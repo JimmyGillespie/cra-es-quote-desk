@@ -1,0 +1,19 @@
+{
+  "_note": "RDS (realistic disaster scenario) events reported on the 'RDS Events' tab. Ported from mod_RDS.bas GetEventMap. Edit here to add or rename events.",
+  "events": {
+    "2874165": "North East Windstorm",
+    "2867710": "Carolinas Windstorm",
+    "2848918": "Gulf of Mexico Windstorm",
+    "2865409": "Miami-Dade Windstorm",
+    "2869298": "Pinellas Windstorm",
+    "15022534": "Los Angeles EQ",
+    "15006191": "San Francisco EQ",
+    "15355285": "New Madrid RDS EQ",
+    "15631361": "PNW/BC EQ 100yr",
+    "15631695": "PNW/BC EQ 250yr",
+    "15623863": "PNW/BC EQ 500yr",
+    "15669240": "Quebec EQ 100yr",
+    "15675523": "Quebec EQ 250yr",
+    "15666680": "Quebec EQ 500yr"
+  }
+}

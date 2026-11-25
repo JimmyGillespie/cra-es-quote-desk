@@ -1,0 +1,30 @@
+{
+  "_status": "LEGACY-UNVERIFIED. These IDs are copied from RunAnalysis.bas (RunRMSAnalysis). The analyses in the current template were created with named profiles (AS_US_Prop_EQShakes+FF, AS_EQ_PREBIND, AS_TO_PREBIND, AS_HD_FR_PREBIND, output AS_Amtrust_output), so confirm every ID in RMS before running analyses from the app. They can be edited on the Run page and are saved with the account.",
+  "currency": {"code": "USD", "scheme": "RMS", "asOfDate": "2024-04-03", "vintage": "RL24"},
+  "global_analysis_settings": {"franchiseDeductible": false, "treatConstructionOccupancyAsUnknown": true},
+  "output_profile_id": 11,
+  "perils": [
+    {"code": "WS", "label": "Windstorm",               "model_profile_id": 90,  "event_rate_scheme_id": 578},
+    {"code": "EQ", "label": "Earthquake",              "model_profile_id": 89,  "event_rate_scheme_id": 163},
+    {"code": "TO", "label": "Severe convective storm", "model_profile_id": 91,  "event_rate_scheme_id": 69},
+    {"code": "WT", "label": "Winter storm",            "model_profile_id": 92,  "event_rate_scheme_id": 27},
+    {"code": "FL", "label": "Flood",                   "model_profile_id": 163, "event_rate_scheme_id": 49},
+    {"code": "FR", "label": "Wildfire",                "model_profile_id": 162, "event_rate_scheme_id": 0},
+    {"code": "TR", "label": "Terrorism",               "model_profile_id": 150, "event_rate_scheme_id": 0}
+  ],
+  "grouping": {
+    "num_simulations": 50000,
+    "simulate_to_plt": true,
+    "propagate_detailed_losses": false,
+    "max_analysis_name": 64,
+    "region_peril_simulation_set": [
+      {"perilCode": "WS", "regionCode": "NA", "modelRegionCode": "NAWS", "eventRateSchemeId": 578, "simulationSetId": 131, "simulationPeriods": 100000, "engineVersion": "RL24"},
+      {"perilCode": "CS", "regionCode": "NA", "modelRegionCode": "USCS", "eventRateSchemeId": 69,  "simulationSetId": 84,  "simulationPeriods": 100000, "engineVersion": "RL24"},
+      {"perilCode": "EQ", "regionCode": "NA", "modelRegionCode": "NAEQ", "eventRateSchemeId": 163, "simulationSetId": 87,  "simulationPeriods": 100000, "engineVersion": "RL24"},
+      {"perilCode": "WT", "regionCode": "NA", "modelRegionCode": "NAWT", "eventRateSchemeId": 27,  "simulationSetId": 58,  "simulationPeriods": 100000, "engineVersion": "RL24"},
+      {"perilCode": "FL", "regionCode": "US", "modelRegionCode": "USFL", "eventRateSchemeId": 0,   "simulationSetId": 36,  "simulationPeriods": 51200000, "engineVersion": "HDv1.2"},
+      {"perilCode": "WF", "regionCode": "NA", "modelRegionCode": "NAWF", "eventRateSchemeId": 0,   "simulationSetId": 53,  "simulationPeriods": 102400000, "engineVersion": "HDv2.0"},
+      {"perilCode": "TR", "regionCode": "ZZ", "modelRegionCode": "ZZTR", "eventRateSchemeId": 0,   "simulationSetId": 46,  "simulationPeriods": 2073776040, "engineVersion": "HDv1.0"}
+    ]
+  }
+}
