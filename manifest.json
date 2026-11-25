@@ -6,7 +6,7 @@
     "entrypoint": "app.py"
   },
   "python": {
-    "version": "3.11.2",
+    "version": "3.11.9",
     "package_manager": {
       "name": "pip",
       "version": "25.3",
@@ -131,5 +131,8 @@
     "views/results.py": {
       "checksum": "663e5c54fc14d9711a06f67ae69cc7ed"
     }
+  },
+  "environment": {
+    "image": "amtprdacrk8s01.azurecr.io/content-pro-krb-r4.3.1-p3.11.9-q1.5.57-ubuntu2204:posit-connect-pkg-resources-fix.latest"
   }
 }
