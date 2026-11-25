@@ -104,9 +104,8 @@
     "README.md": {
       "checksum": "e0f1cb38a0aebdb4e0e6b44149ca064b"
     },
- "requirements.txt": {
-  "checksum": "c40776e58ed0faea2f7615c2026bd22e"
-},
+    "requirements.txt": {
+      "checksum": "c40776e58ed0faea2f7615c2026bd22e"
     },
     "views/__init__.py": {
       "checksum": "d41d8cd98f00b204e9800998ecf8427e"
