@@ -1,5 +1,5 @@
 streamlit>=1.40
-pandas>=2.0
+pandas>=2.0,<3
 numpy
 requests>=2.31
 openpyxl>=3.1
