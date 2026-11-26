@@ -1,19 +1,17 @@
-"""Location rows, bands, map aggregation and data-quality checks.
+"""Location rows, bands, map aggregation, account selection and reconciliation.
 
-Port of GetALLExposureLocationsWithCorrectTIV_Combined (Get_Loc_Hazard_Refresh_ALL.bas): same 37 columns, same TIV
-rules (total from the list call, Building / Contents / BI from the per-location detail call), same Wind Tier column.
+Port of GetALLExposureLocationsWithCorrectTIV_Combined (Get_Loc_Hazard_Refresh_ALL.bas): same 37 columns, same TIV rules
+(total from the list call; Building / Contents / BI from the per-location detail call), same Wind Tier column.
 
-Deliberate differences from the macro (each is covered by a test and listed in docs/MIGRATION_SPEC.md):
-  * Year Built blank / 0 / 9999 -> 'Unknown'  (the macro put a blank year into 'Pre-1990')
+Deliberate differences (each covered by a test):
+  * Year Built blank / 0 / 9999 -> 'Unknown'  (the macro put 9999 into '2020-2030': 5 of 58 Ben Davis locations)
   * Stories blank / 0 -> 'Unknown'
-  * 'Account Name' is the EDM name, as before; ALL accounts are kept (the 'ALL accounts' macro, not the
-    highest-accountId macro Run_Exposure_Hazards_And_Refresh)
 """
 from __future__ import annotations
 
 import pandas as pd
 
-from ..constants import ALL_LOC_COLUMNS, HAZARD_COLUMNS, LOC_COLUMNS, WIND_COLUMN
+from ..constants import ALL_LOC_COLUMNS, WIND_COLUMN
 from ..rms.core import gj, gobj, gv, safe_get, to_num
 from .windtier import wind_tier
 
@@ -26,7 +24,7 @@ def strip_prefix(txt: str) -> str:
 
 def year_band(y) -> str:
     n = to_num(y)
-    if n is None or n <= 0 or n >= 2100:                 # blank, 0, or the 9999 placeholder
+    if n is None or n <= 0 or n >= 2100:
         return "Unknown"
     if n >= 2020:
         return "2020-2030"
@@ -173,8 +171,7 @@ WIND_ORDER = ["T1", "T2", "Rest of State", "N/A"]
 def exposure_summaries(df: pd.DataFrame) -> dict:
     """The eight Exposure Summary pivots, in the order they sit on the sheet."""
     state = (df.groupby(["Admin1", "Admin2"], dropna=False)
-               .agg(**{"Loc Count": ("LocID", "count"), "Sum of Location TIV": ("Location TIV", "sum")})
-               .reset_index())
+               .agg(**{"Loc Count": ("LocID", "count"), "Sum of Location TIV": ("Location TIV", "sum")}).reset_index())
     state["Admin1"] = state["Admin1"].fillna("(blank)")
     state["Admin2"] = state["Admin2"].fillna("(blank)")
     return {
@@ -191,15 +188,12 @@ def exposure_summaries(df: pd.DataFrame) -> dict:
 
 # ---------------------------------------------------------------- account selection (two macros in the workbook)
 def account_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """Locations and TIV per RMS account number - an EDM often holds one account per layer import."""
     g = df.groupby("Account Number", dropna=False).agg(Locations=("LocID", "count"), TIV=("Location TIV", "sum")).reset_index()
     return g.sort_values("Account Number", key=lambda s: pd.to_numeric(s, errors="coerce")).reset_index(drop=True)
 
 
 def filter_accounts(df: pd.DataFrame, mode: str = "all", accounts: list | None = None) -> pd.DataFrame:
-    """mode 'all'    = Run_ALL_Exposure_Hazards_And_Refresh (every account)
-       mode 'latest' = Run_Exposure_Hazards_And_Refresh (only the highest account number - 'main account')
-       mode 'pick'   = the listed account numbers"""
+    """'all' = Run_ALL_Exposure_Hazards_And_Refresh; 'latest' = highest account number only; 'pick' = listed accounts."""
     if df is None or not len(df) or mode == "all":
         return df
     nums = pd.to_numeric(df["Account Number"], errors="coerce")
@@ -216,13 +210,22 @@ def repeated_locids(df: pd.DataFrame) -> dict:
     key = df["LocID"].astype(str) + "|" + df["Lat,Long"].astype(str)
     accts = df.groupby(key)["Account Number"].nunique()
     dup = accts[accts > 1].index
-    sub = df[key.isin(dup)]
-    return {"locids": int(len(dup)), "tiv": float(sub["Location TIV"].sum())}
+    return {"locids": int(len(dup)), "tiv": float(df[key.isin(dup)]["Location TIV"].sum())}
 
 
-# ---------------------------------------------------------------- reconciliation (new)
+def share_point_stats(df: pd.DataFrame) -> dict:
+    """Locations that share a Lat,Long with at least one other location (campus / multi-building sites)."""
+    if df is None or not len(df):
+        return {"locations": 0, "tiv": 0.0, "groups": 0}
+    ll = df["Lat,Long"].astype(str)
+    cnt = ll.map(ll.value_counts())
+    sub = df[cnt > 1]
+    return {"locations": int(len(sub)), "tiv": float(sub["Location TIV"].sum()), "groups": int(ll[cnt > 1].nunique())}
+
+
+# ---------------------------------------------------------------- reconciliation
 def reconcile(df: pd.DataFrame, tiv_reported=None, expected_count: int | None = None) -> dict:
-    """Checks the workbook only implied. Returns {'tiv_modelled', 'tiv_reported', 'delta', 'flags': [...]}."""
+    """Checks the workbook only implied. Returns tiv_modelled / tiv_reported / delta / flags [(level, text)]."""
     flags = []
     n = len(df)
     tiv = float(df["Location TIV"].sum()) if n else 0.0
@@ -245,13 +248,19 @@ def reconcile(df: pd.DataFrame, tiv_reported=None, expected_count: int | None = 
             flags.append(("warn", f"{nostate:,} location(s) with no state (Admin1) - hazards and wind tier cannot be set."))
         noyear = int((df["Year Built Band"] == "Unknown").sum())
         if noyear:
-            flags.append(("info", f"{noyear:,} location(s) with unknown year built."))
+            flags.append(("info", f"{noyear:,} location(s) with unknown year built (blank, 0 or 9999)."))
         na_wind = int((df[WIND_COLUMN] == "N/A").sum())
         if na_wind:
             flags.append(("info", f"{na_wind:,} location(s) with wind tier N/A (state / county not in the lookup)."))
         nonus = int((~df["Country"].astype(str).str.upper().isin(["UNITED STATES", "US"])).sum())
         if nonus:
             flags.append(("info", f"{nonus:,} location(s) outside the US (no hazard enrichment)."))
+        haz = df["mmi100yr"].map(lambda v: v not in (None, "", "Error")) if "mmi100yr" in df else None
+        if haz is not None and haz.any():
+            sub = df[haz]
+            no_mmi = sub["mmi100yr"].map(lambda v: to_num(v) in (None, 0.0)).all()
+            if no_mmi:
+                flags.append(("info", "The 100-year MMI layer returned no value for any enriched location, so earthquake shaking is not shown."))
     n_acc = df["Account Number"].nunique() if n else 0
     rep_dup = repeated_locids(df)
     if n_acc > 1:
@@ -264,4 +273,3 @@ def reconcile(df: pd.DataFrame, tiv_reported=None, expected_count: int | None = 
     if rep:
         delta = tiv / rep - 1
     return {"tiv_modelled": tiv, "tiv_reported": rep, "delta": delta, "locations": n, "flags": flags}
-
