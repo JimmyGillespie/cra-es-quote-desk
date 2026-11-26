@@ -1,17 +1,12 @@
-"""EP results: the 'Results' sheet, the EP GrUp / layer tabs, and the statistics block.
+"""EP results: the 'Results' sheet, the EP GrUp / layer tabs, statistics and result checks.
 
 Port of mod_EP.bas GetEPResults_Simple_Combined plus the INDEX/MATCH formulas on 'EP GrUp' and the layer tabs.
+A *column* is one (analysis, perspective, EP type): key1 = GU_AEP_WS, key2 = GU_AEP_WS_<layer>.
 
-A *column* is one (analysis, perspective, EP type):  key1 = GU_AEP_WS , key2 = GU_AEP_WS_<layer>
-(Results rows 2 and 3).  The workbook looked values up with MATCH(...,0) so the FIRST column with a key won; that is
-kept, and duplicates are now reported instead of silently ignored.
-
-Decisions kept from the workbook:
-  * GU tables ignore the layer (ground-up loss is the same for every layer) - first analysis with the peril wins.
-  * GR tables key on peril + layer.
-  * 'All Perils' = the multi-peril (YY, grouped) analysis for losses and for Std Dev / CV.
-  * 'All Perils' Pure Premium = sum of the single-peril pure premiums (as before) - the YY value is shown as a check.
-Fixed: EP GrUp had a typed-in Std Dev and CV for All Perils (D23, D24). Both now come from the YY analysis.
+Kept from the workbook: lookups are first-match; GU tables ignore the layer; GR tables key on peril + layer;
+'All Perils' losses / Std Dev / CV come from the grouped (YY) analysis; All Perils Pure Premium = sum of single perils.
+Fixed: EP GrUp had a typed-in All Perils Std Dev / CV (1,110,743 / 8.63 in the Ben Davis file; the YY analysis says
+1,676,110 / 6.58) - both now come from the YY analysis.
 """
 from __future__ import annotations
 
@@ -19,9 +14,9 @@ from collections import OrderedDict
 
 import pandas as pd
 
-from ..constants import PERIL_ALIASES, PERIL_COLUMNS, PERSPECTIVES, RP_LIST, RP_PROBABILITY
+from ..constants import PERIL_ALIASES, PERIL_COLUMNS, PERIL_NAMES, PERSPECTIVES, RP_LIST, RP_PROBABILITY, TAIL_RP
 from ..rms.core import gj, gobj, gv, json_or_none, to_num
-from .layers import extract_layer
+from .layers import extract_layer, layer_key
 
 EP_TYPES = ("AEP", "OEP")
 SINGLE_PERILS = [c for c, _ in PERIL_COLUMNS if c != "YY"]
@@ -69,52 +64,35 @@ def parse_stats(text_or_obj) -> tuple:
     if not isinstance(s2, dict):
         return (None, None, None)
     pp, sd, cv = gj(s2, "purePremium"), gj(s2, "totalStdDev"), gj(s2, "cv")
-    if not pp:
-        pp = gj(s2, "purePremiumAmount")
-    if not sd:
-        sd = gj(s2, "standardDeviation")
-    if not cv:
-        cv = gj(s2, "coefficientOfVariation")
+    pp = pp or gj(s2, "purePremiumAmount")
+    sd = sd or gj(s2, "standardDeviation")
+    cv = cv or gj(s2, "coefficientOfVariation")
     return (to_num(pp), to_num(sd), to_num(cv))
 
 
 def analysis_record(meta: dict, ep_by_persp: dict, stats_by_persp: dict) -> dict:
-    """One analysis as stored on the account: meta fields used by the Meta tab + parsed EP/stats."""
+    """One analysis as stored on the account: the Meta-tab fields + parsed EP / stats."""
     name = gj(meta, "analysisName")
     return {
-        "analysisId": gj(meta, "analysisId"),
-        "appAnalysisId": gj(meta, "appAnalysisId"),
-        "analysisName": name,
-        "layer": extract_layer(name),
-        "peril": gj(meta, "peril"),
-        "perilCode": norm_peril(gj(meta, "perilCode")),
-        "subPeril": gj(meta, "subPeril"),
-        "exposureName": gj(meta, "exposureName"),
-        "exposureResourceId": gj(meta, "exposureResourceId"),
-        "exposureResourceType": gj(meta, "exposureResourceType"),
-        "region": gj(meta, "region"),
-        "engineVersion": gj(meta, "engineVersion"),
-        "lossAmplification": gj(meta, "lossAmplification"),
-        "currencyCode": gj(gobj(meta, "currency"), "currencyCode"),
-        "currencyName": gj(gobj(meta, "currency"), "currencyName"),
+        "analysisId": gj(meta, "analysisId"), "appAnalysisId": gj(meta, "appAnalysisId"),
+        "analysisName": name, "layer": extract_layer(name), "peril": gj(meta, "peril"),
+        "perilCode": norm_peril(gj(meta, "perilCode")), "subPeril": gj(meta, "subPeril"),
+        "exposureName": gj(meta, "exposureName"), "exposureResourceId": gj(meta, "exposureResourceId"),
+        "exposureResourceType": gj(meta, "exposureResourceType"), "region": gj(meta, "region"),
+        "engineVersion": gj(meta, "engineVersion"), "lossAmplification": gj(meta, "lossAmplification"),
+        "currencyCode": gj(gobj(meta, "currency"), "currencyCode"), "currencyName": gj(gobj(meta, "currency"), "currencyName"),
         "currencyVintage": gj(gobj(meta, "currency"), "currencyVintage"),
-        "modelProfile": gj(gobj(meta, "modelProfile"), "name"),
-        "outputProfile": gj(gobj(meta, "outputProfile"), "name"),
-        "username": gj(meta, "username"),
-        "description": gj(meta, "description"),
-        "createDate": gj(meta, "createDate"),
-        "ep": ep_by_persp,        # {"GU": {"AEP": [...], "OEP": [...]}, "GR": ..., "RL": ...}
-        "stats": stats_by_persp,  # {"GU": [pp, sd, cv], ...}
+        "modelProfile": gj(gobj(meta, "modelProfile"), "name"), "outputProfile": gj(gobj(meta, "outputProfile"), "name"),
+        "username": gj(meta, "username"), "description": gj(meta, "description"), "createDate": gj(meta, "createDate"),
+        "ep": ep_by_persp, "stats": stats_by_persp,
     }
 
 
-# ---------------------------------------------------------------- the 'Results' sheet
 def results_columns(analyses: list, yy_alias: set | None = None) -> list:
     """Flatten analyses -> one column per (analysis, perspective, EP type), in the workbook's order.
 
-    yy_alias: analysis IDs to ALSO publish as 'All Perils' (YY). This is the Single_Peril macro: when a layer was only run
-    for one peril there is no grouped analysis, so the single-peril columns were copied and relabelled YY by hand.
-    The copy is added after the real columns, so the real peril column is still there.
+    yy_alias: analysis IDs to ALSO publish as 'All Perils' (the Single_Peril macro): when a layer was run for one peril
+    only, its columns are copied and relabelled YY. The real peril column is kept.
     """
     yy_alias = {str(x) for x in (yy_alias or set())}
     cols = []
@@ -149,7 +127,6 @@ def results_frame(cols: list) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
-# ---------------------------------------------------------------- lookups
 def find_column(cols: list, perspective: str, ep_type: str, peril: str, layer: str | None = None):
     """First column that matches (MATCH(...,0))."""
     for c in cols:
@@ -186,12 +163,10 @@ def stats_table(cols: list, perspective: str, layer: str | None = None) -> pd.Da
         rows["CV:"].append(c["cv"] if c else None)
         if c and c["purePremium"] is not None:
             per_peril_pp.append(c["purePremium"])
-    all_pp = sum(per_peril_pp) if per_peril_pp else (yy["purePremium"] if yy else None)
-    all_sd = yy["stdDev"] if yy else None
-    all_cv = yy["cv"] if yy else None
     out = pd.DataFrame({"": list(rows.keys())})
-    out["All Perils"] = [all_pp, all_sd, all_cv]
-    for (code, label), pp, sd, cv in zip([x for x in PERIL_COLUMNS if x[0] != "YY"],
+    out["All Perils"] = [sum(per_peril_pp) if per_peril_pp else (yy["purePremium"] if yy else None),
+                         yy["stdDev"] if yy else None, yy["cv"] if yy else None]
+    for (_code, label), pp, sd, cv in zip([x for x in PERIL_COLUMNS if x[0] != "YY"],
                                          rows["Pure Premium:"], rows["Std Dev:"], rows["CV:"]):
         out[label] = [pp, sd, cv]
     return out
@@ -206,45 +181,88 @@ def layers_in_order(analyses: list, preferred: list | None = None) -> list:
     return out
 
 
+def gu_overview(cols: list) -> dict:
+    """Ground-up annual average loss (AAL = pure premium), dominant peril and its share."""
+    yy = find_column(cols, "GU", "AEP", "YY")
+    parts = {}
+    for code in SINGLE_PERILS:
+        c = find_column(cols, "GU", "AEP", code)
+        if c and not c.get("aliasOf") and c["purePremium"] is not None:
+            parts[code] = c["purePremium"]
+    total_single = sum(parts.values())
+    aal = yy["purePremium"] if yy and yy["purePremium"] is not None else (total_single or None)
+    dom = max(parts, key=parts.get) if parts and total_single > 0 else None
+    return {"aal": aal, "aal_source": "grouped" if yy and yy["purePremium"] is not None else "sum of perils",
+            "dominant": dom, "dominant_share": (parts[dom] / total_single) if dom else None, "by_peril": parts,
+            "rp250": (yy["values"][RP_LIST.index(250)] if yy else None)}
+
+
+def _fmt_m(v) -> str:
+    return f"{v / 1e6:,.1f}m" if abs(v) >= 1e6 else f"{v:,.0f}"
+
+
 def check_results(analyses: list, cols: list, tol: float = 0.005) -> list:
     """Warnings the workbook never raised. -> [(level, message)]."""
     out = []
-    # duplicate (peril, layer) analyses: MATCH would silently use the first
+    # 1 duplicate (layer, peril): MATCH silently used the first
     seen = {}
     for a in analyses:
-        k = (a["layer"], a["perilCode"])
-        seen.setdefault(k, []).append(a["analysisId"])
+        seen.setdefault((a["layer"], a["perilCode"]), []).append(a["analysisId"])
     for (layer, peril), ids in seen.items():
         if len(ids) > 1:
-            out.append(("warn", f"Layer {layer}, peril {peril}: {len(ids)} analyses ({', '.join(ids)}). "
+            out.append(("warn", f"Layer {layer}, {PERIL_NAMES.get(peril, peril)}: {len(ids)} analyses ({', '.join(ids)}). "
                                 f"Only the first is used - untick the others."))
-    # ground-up should not depend on the layer
+    # 2 one layer spelled two ways
+    spell = {}
+    for a in analyses:
+        spell.setdefault(layer_key(a["layer"]), set()).add(a["layer"])
+    for names in spell.values():
+        if len(names) > 1:
+            out.append(("warn", f"Layer names {', '.join(sorted(names))} look like the same layer - they are split into separate tabs."))
+    # 3 ground-up should not depend on the layer
     for ep_type in EP_TYPES:
         for code, _ in PERIL_COLUMNS:
             vals = [c for c in cols if c["perspective"] == "GU" and c["epType"] == ep_type and c["perilCode"] == code]
             if len(vals) > 1:
                 ref = vals[0]["values"]
                 for other in vals[1:]:
-                    for r, o in zip(ref, other["values"]):
-                        if r and o is not None and abs(o - r) / abs(r) > tol:
-                            out.append(("warn", f"Ground-up {ep_type} for {code} differs between layers "
-                                                f"{vals[0]['layer']} and {other['layer']} (more than {tol:.1%})."))
-                            break
-                    else:
-                        continue
-                    break
-    # sum of single-peril pure premium vs the grouped (YY) pure premium
+                    if any(r and o is not None and abs(o - r) / abs(r) > tol for r, o in zip(ref, other["values"])):
+                        out.append(("warn", f"Ground-up {ep_type} for {PERIL_NAMES.get(code, code)} differs between layers "
+                                            f"{vals[0]['layer']} and {other['layer']} (more than {tol:.1%})."))
+                        break
+    # 4 ground-up loss but no layer curve
+    for a in analyses:
+        ep = a.get("ep") or {}
+        if ep.get("GU") and not ep.get("GR") and a["perilCode"] not in ("", "YY"):
+            out.append(("warn", f"Layer {a['layer']}, {PERIL_NAMES.get(a['perilCode'], a['perilCode'])}: RMS returned a ground-up curve "
+                                f"but no layer (gross) curve, so this peril shows 0 for the layer. Either the layer takes no loss or "
+                                f"the analysis did not finish."))
     for layer in {a["layer"] for a in analyses}:
         yy = find_column(cols, "GR", "AEP", "YY", layer)
-        parts = [find_column(cols, "GR", "AEP", p, layer) for p in SINGLE_PERILS]
-        parts = [p["purePremium"] for p in parts if p and p["purePremium"] is not None]
-        if yy and yy["purePremium"] and parts:
-            tot = sum(parts)
-            if abs(tot - yy["purePremium"]) / abs(yy["purePremium"]) > 0.01:
-                out.append(("warn", f"Layer {layer}: sum of single-peril pure premium ({tot:,.0f}) differs from the "
-                                    f"grouped analysis ({yy['purePremium']:,.0f}) by more than 1%."))
-    # a layer with no multi-peril analysis cannot show 'All Perils'
-    for layer in {a["layer"] for a in analyses}:
-        if not find_column(cols, "GR", "AEP", "YY", layer):
+        if not yy:
             out.append(("info", f"Layer {layer}: no grouped (multi-peril) analysis, so 'All Perils' losses are blank."))
+            continue
+        # 5 sum of single perils vs grouped pure premium
+        parts = [find_column(cols, "GR", "AEP", p, layer) for p in SINGLE_PERILS]
+        parts = [p["purePremium"] for p in parts if p and p["purePremium"] is not None and not p.get("aliasOf")]
+        if yy["purePremium"] and parts:
+            tot = sum(parts)
+            if abs(tot - yy["purePremium"]) / abs(yy["purePremium"]) > 0.05 and abs(tot - yy["purePremium"]) > 500:
+                out.append(("warn", f"Layer {layer}: single-peril pure premium adds to {tot:,.0f} but the grouped All Perils analysis says "
+                                    f"{yy['purePremium']:,.0f} (more than 5% apart). The tabs show the sum; the grouped value is on the Results tab."))
+        # 6 tail: grouped All Perils below one of its own perils
+        low = []
+        for code in SINGLE_PERILS:
+            pc = find_column(cols, "GR", "AEP", code, layer)
+            if not pc or pc.get("aliasOf"):
+                continue
+            for i, rp in enumerate(RP_LIST):
+                pv, yv = pc["values"][i], yy["values"][i]
+                if rp >= TAIL_RP and pv and pv > 1000 and yv is not None and yv < 0.95 * pv:
+                    low.append((rp, PERIL_NAMES.get(code, code), yv, pv))
+        if low:
+            rp, nm, yv, pv = max(low, key=lambda t: t[0])
+            out.append(("warn", f"Layer {layer}: All Perils at {rp:,}-year ({_fmt_m(yv)}) is below {nm} on its own ({_fmt_m(pv)}). "
+                                f"Grouped analyses use far fewer simulated years than the single-peril models, so the far tail "
+                                f"(1,000-year and above) is thin. Rely on the 250-year and below, or re-run with more simulations."))
     return out
