@@ -1,20 +1,19 @@
-"""RMS calls for Dynamic Layering: copy a portfolio (with its accounts), rename it, set the layer terms on its policies.
+"""RMS calls for Dynamic Layering: copy an ACCOUNT, create a PORTFOLIO, attach accounts to it, set the layer terms.
 
-Every call is a thin wrapper that returns plain dicts, so the orchestration in cra/layering.py can be tested with a fake.
+Why account-first: copying a PORTFOLIO links the new portfolio to the ORIGINAL accounts (confirmed on a live EDM: one account
+in the EDM after the copy), whatever linkExistingAccounts says. So the app copies each account (a real, independent copy),
+creates the portfolio, and attaches the copies with the documented "Manage accounts by portfolio" call.
 
-Where each request shape comes from (RMS developer portal, read when this was written):
-  [docs]    POST /platform/copy/v1/jobs                    resourceUri + resourceType PORTFOLIO + settings; header
-                                                           x-rms-resource-group-id; 201 + Location header = job URL
-  [docs]    GET  .../exposures/{id}/portfolios/{pid}/accounts
-  [docs]    PUT  .../exposures/{id}/accounts/{aid}          accountName, accountNumber (required) + cedant etc.
-  [docs]    PUT  .../exposures/{id}/policies/{pid}          policy: partOf, attachmentPoint, blanketLimit ...
-                                                           (field names confirmed on the Risk Modeler v1 policy; the
-                                                            Platform page shows the same policy model)
-  [assumed] settings keys name / number / linkExistingAccounts for the copy job (the docs say the copy "must be
-            renamed" and that portfolios link to existing child accounts unless told otherwise, but the page does not
-            list the key names) - they are editable in the app and the portfolio is renamed explicitly afterwards.
-  [assumed] GET/PUT .../portfolios/{pid} to rename a portfolio; GET .../accounts and GET .../policies?filter=...
-None of this has been run against a live tenant yet.
+Where each request shape comes from (RMS developer portal):
+  [docs]  POST  /platform/copy/v1/jobs                 resourceUri + resourceType (ACCOUNT | PORTFOLIO) + settings;
+                                                       header x-rms-resource-group-id; 201 + Location = job URL.
+                                                       RMS replied "settings.name / settings.number must not be blank".
+  [docs]  POST  .../exposures/{id}/portfolios          portfolioName (<=40), portfolioNumber (<=20), description; 201 + Location
+  [docs]  PATCH .../exposures/{id}/portfolios/{pid}/accounts   accountsToAdd + accountsToRemove (both required, may be empty)
+  [docs]  PUT   .../exposures/{id}/accounts/{aid}      accountName, accountNumber (required)
+  [docs]  PUT   .../exposures/{id}/policies/{pid}      partOf, attachmentPoint, blanketLimit (Risk Modeler v1 field names)
+  [seen]  GET   .../portfolios, .../portfolios/{pid}/accounts, .../policies   worked on a live EDM
+  [infer] GET/PUT .../portfolios/{pid} (rename), GET .../accounts; Risk Modeler v1 policy route as a fallback on 404
 """
 from __future__ import annotations
 
@@ -32,7 +31,8 @@ POLICY_DROP = ("coverages", "reinsuranceCessions", "policyConditions", "uri", "c
 ACCOUNT_KEEP = ("cedant", "producer", "underwriter", "branch", "userId1", "userId2", "userId3", "userId4",
                 "userText1", "userText2")
 PORTFOLIO_KEEP = ("description",)
-DEFAULT_COPY_SETTINGS = {"linkExistingAccounts": False}
+DEFAULT_COPY_SETTINGS: dict = {}                   # extra keys for every copy job; editable in the app (Advanced)
+COPY_PATHS = {"ACCOUNT": "accounts", "PORTFOLIO": "portfolios"}
 
 
 class LayerApiError(RuntimeError):
@@ -42,7 +42,6 @@ class LayerApiError(RuntimeError):
 
 
 def _as_list(parsed) -> list:
-    """A JSON array, or an object wrapping one (RMS list calls are arrays, but be tolerant of wrappers)."""
     if isinstance(parsed, list):
         return parsed
     if isinstance(parsed, dict):
@@ -52,10 +51,17 @@ def _as_list(parsed) -> list:
     return []
 
 
+def _int(v):
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return v
+
+
 # ---------------------------------------------------------------- normalisers (tolerant of key names)
 def norm_portfolio(it: dict) -> dict:
     return {"id": gj(it, "portfolioId") or gj(it, "id"), "name": gj(it, "portfolioName") or gj(it, "name"),
-            "number": gj(it, "portfolioNumber") or gj(it, "number")}
+            "number": gj(it, "portfolioNumber") or gj(it, "number"), "description": gj(it, "description")}
 
 
 def norm_account(it: dict) -> dict:
@@ -73,12 +79,22 @@ def norm_policy(it: dict) -> dict:
 
 
 # ---------------------------------------------------------------- request bodies (pure, so they can be shown and tested)
-def copy_body(exposure_id, base_portfolio_id, name: str, number: str, settings: dict | None = None) -> dict:
+def copy_body(exposure_id, resource_type: str, resource_id, name: str, number: str, settings: dict | None = None) -> dict:
+    """The copy job. resource_type ACCOUNT or PORTFOLIO. RMS requires settings.name and settings.number."""
+    kind = COPY_PATHS[resource_type]
     s = dict(DEFAULT_COPY_SETTINGS)
     s.update({"name": name, "number": number})
     s.update(settings or {})
-    return {"resourceUri": f"/platform/riskdata/v1/exposures/{exposure_id}/portfolios/{base_portfolio_id}",
-            "resourceType": "PORTFOLIO", "settings": s}
+    return {"resourceUri": f"/platform/riskdata/v1/exposures/{exposure_id}/{kind}/{resource_id}",
+            "resourceType": resource_type, "settings": s}
+
+
+def portfolio_create_body(name: str, number: str, description: str = "") -> dict:
+    return {"portfolioName": name, "portfolioNumber": number, "description": (description or "")[:255]}
+
+
+def manage_accounts_body(add: list, remove: list) -> dict:
+    return {"accountsToAdd": [_int(x) for x in add], "accountsToRemove": [_int(x) for x in remove]}
 
 
 def account_update_body(raw: dict, name: str, number: str) -> dict:
@@ -111,12 +127,16 @@ def _job_url(host: str, loc: str) -> str:
     return f"https://{host}{loc}" if loc.startswith("/") else f"https://{host}/{loc}"
 
 
+def _trailing_id(loc: str) -> str:
+    m = re.search(r"/(\d+)/?(?:\?.*)?$", loc or "")
+    return m.group(1) if m else ""
+
+
 # ---------------------------------------------------------------- the client
 class LayerApi:
-    def __init__(self, svc):
-        self.svc = svc
-        self.http = svc.http
-        self.c = svc.c
+    def __init__(self, svc, edm_name: str = ""):
+        self.svc, self.http, self.c = svc, svc.http, svc.c
+        self.edm_name = edm_name                      # only needed for the Risk Modeler v1 policy fallback
 
     # ---- plumbing
     def _exp(self, exposure_id) -> str:
@@ -144,9 +164,10 @@ class LayerApi:
             offset += PAGE
         return out
 
-    def _put(self, url: str, body: dict) -> dict:
-        r = self.http._do("PUT", url, self._key(), body=json.dumps(body))
-        return {"ok": 200 <= r.status < 300, "http": r.status, "text": (r.text or "")[:600], "body": body}
+    def _send(self, method: str, url: str, body: dict, retries: int = 3) -> dict:
+        r = self.http._do(method, url, self._key(), body=json.dumps(body), retries=retries)
+        return {"ok": 200 <= r.status < 300, "http": r.status, "text": (r.text or "")[:600], "body": body,
+                "headers": r.headers or {}}
 
     # ---- reads
     def list_portfolios(self, exposure_id) -> list:
@@ -159,11 +180,13 @@ class LayerApi:
         return [norm_account(i) for i in self._paged(f"{self._exp(exposure_id)}/accounts")]
 
     def list_policies(self, exposure_id, account_id) -> list:
-        """Policies of one account. Tries the filtered search first, then the nested path; the first that returns any wins."""
-        urls = (f"{self._exp(exposure_id)}/policies?filter={quote('accountId=' + str(account_id), safe='')}",
-                f"{self._exp(exposure_id)}/accounts/{account_id}/policies")
+        """Policies of one account: the filtered search, then the nested path, then the whole EDM filtered here."""
+        aid = str(account_id)
+        routes = ((f"{self._exp(exposure_id)}/policies?filter={quote('accountId=' + aid, safe='')}", False),
+                  (f"{self._exp(exposure_id)}/accounts/{aid}/policies", False),
+                  (f"{self._exp(exposure_id)}/policies", True))
         last, answered = None, False
-        for url in urls:
+        for url, strict in routes:
             try:
                 items = self._paged(url)
             except LayerApiError as exc:
@@ -171,7 +194,7 @@ class LayerApi:
                 continue
             answered = True
             pols = [norm_policy(i) for i in items]
-            pols = [p for p in pols if not p["account_id"] or p["account_id"] == str(account_id)]
+            pols = [p for p in pols if p["account_id"] == aid or (not strict and not p["account_id"])]
             if pols:
                 return pols
         if answered:
@@ -179,15 +202,16 @@ class LayerApi:
         raise last
 
     # ---- copy job
-    def submit_copy_job(self, exposure_id, base_portfolio_id, name: str, number: str, settings: dict | None = None) -> dict:
-        body = copy_body(exposure_id, base_portfolio_id, name, number, settings)
+    def submit_copy_job(self, exposure_id, resource_type: str, resource_id, name: str, number: str,
+                        settings: dict | None = None) -> dict:
+        body = copy_body(exposure_id, resource_type, resource_id, name, number, settings)
         rg = self.c.grouping_resource_group_id or self.svc.resource_group_id()
         headers = {"x-rms-resource-group-id": rg} if rg else None
         url = f"https://{self.c.host}/platform/copy/v1/jobs"
         r = self.http._do("POST", url, self._key(), body=json.dumps(body), headers=headers, retries=1)   # never double-submit
         loc = (r.headers or {}).get("Location") or (r.headers or {}).get("location") or ""
         return {"ok": 200 <= r.status < 300 and bool(loc), "http": r.status, "job_url": _job_url(self.c.host, loc),
-                "text": (r.text or "")[:600] if not (200 <= r.status < 300) else (r.text or "")[:600] or "(no body)", "body": body}
+                "text": (r.text or "")[:600], "body": body}
 
     def poll_job(self, job_url: str) -> dict:
         r = self.http.get(job_url, self._key(), headers=None)
@@ -197,30 +221,50 @@ class LayerApi:
             status = str(p.get("status") or p.get("jobStatus") or "UNKNOWN").upper()
         return {"http": r.status, "status": status, "raw": (r.text or "")[:4000]}
 
-    @staticmethod
-    def job_new_portfolio_id(raw: str, base_portfolio_id) -> str:
-        ids = {i for i in re.findall(r"/portfolios/(\d+)", raw or "") if i != str(base_portfolio_id)}
-        return ids.pop() if len(ids) == 1 else ""
+    # ---- portfolio and account writes
+    def create_portfolio(self, exposure_id, name: str, number: str, description: str = "") -> dict:
+        url = f"{self._exp(exposure_id)}/portfolios"
+        res = self._send("POST", url, portfolio_create_body(name, number, description), retries=1)   # never double-create
+        loc = {k.lower(): v for k, v in res["headers"].items()}.get("location", "")
+        res["portfolio_id"] = _trailing_id(loc) if res["ok"] else ""
+        return res
 
-    # ---- writes (each reads the current object first, so nothing the object already holds is lost)
+    def manage_portfolio_accounts(self, exposure_id, portfolio_id, add: list, remove: list) -> dict:
+        url = f"{self._exp(exposure_id)}/portfolios/{portfolio_id}/accounts"
+        res = self._send("PATCH", url, manage_accounts_body(add, remove))
+        p = json_or_none(res["text"]) if res["ok"] else None
+        if isinstance(p, dict):
+            for key in ("addAccounts", "removeAccounts"):
+                part = p.get(key) or {}
+                if part.get("total") is not None and part.get("completed") != part.get("total"):
+                    res["ok"] = False
+                    res["text"] = f"RMS processed only part of the request: {res['text']}"
+        return res
+
     def update_portfolio(self, exposure_id, portfolio_id, name: str, number: str) -> dict:
         url = f"{self._exp(exposure_id)}/portfolios/{portfolio_id}"
         raw = self._get_json(url)
-        return self._put(url, portfolio_update_body(raw if isinstance(raw, dict) else {}, name, number))
+        return self._send("PUT", url, portfolio_update_body(raw if isinstance(raw, dict) else {}, name, number))
 
     def update_account(self, exposure_id, account_id, name: str, number: str) -> dict:
         url = f"{self._exp(exposure_id)}/accounts/{account_id}"
         raw = self._get_json(url)
-        return self._put(url, account_update_body(raw if isinstance(raw, dict) else {}, name, number))
+        return self._send("PUT", url, account_update_body(raw if isinstance(raw, dict) else {}, name, number))
 
     def update_policy_terms(self, exposure_id, policy_id, limit: float, attachment: float, blanket: float) -> dict:
         url = f"{self._exp(exposure_id)}/policies/{policy_id}"
-        raw = self._get_json(url)
+        try:
+            raw = self._get_json(url)
+        except LayerApiError as exc:
+            if exc.status not in (404, 405) or not self.edm_name:
+                raise
+            url = f"https://{self.c.host}/riskmodeler/v1/policies/{policy_id}?datasource={quote(self.edm_name, safe='')}"
+            raw = self._get_json(url)                                   # Risk Modeler v1 route
         pol = norm_policy(raw if isinstance(raw, dict) else {})
-        return self._put(url, policy_update_body(pol, limit, attachment, blanket))
+        return self._send("PUT", url, policy_update_body(pol, limit, attachment, blanket))
 
 
-def make_api(svc, demo: bool = False):
+def make_api(svc, demo: bool = False, edm_name: str = ""):
     """The real client, or the in-memory demo when the app runs with CRA_DEMO=1."""
     if demo:
         from .demo_layering import DemoLayerApi
@@ -232,4 +276,4 @@ def make_api(svc, demo: bool = False):
             except AttributeError:
                 pass
         return api
-    return LayerApi(svc)
+    return LayerApi(svc, edm_name)
