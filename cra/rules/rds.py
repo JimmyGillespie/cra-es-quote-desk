@@ -1,14 +1,14 @@
 """RDS event table (mod_RDS.bas GetRMS_RDS_Events_GU_AllGR).
 
-Output: Eventid | EventName | GU_Loss | <layer>_GR ... exactly as the 'RDS Events' tab.
-The macro overwrote cells in analysis order, so which analysis won was accidental. The rule here is explicit:
-  * prefer the grouped (YY) analysis, otherwise the first analysis with a loss for that event;
-  * if two analyses disagree by more than 0.5% a warning is raised.
+Output: Eventid | EventName | GU_Loss | <layer>_GR ... exactly as the 'RDS Events' tab. The macro overwrote cells in
+analysis order, so which analysis won was accidental. Rule: prefer the grouped (YY) analysis, otherwise the first with a
+loss; a >0.5% disagreement raises a warning. Layers are the account's layers (see rules/layers.py), so one layer is one column.
 """
 from __future__ import annotations
 
 import pandas as pd
 
+from ..constants import PERIL_NAMES
 from ..rms.core import gj, gv, json_or_none, to_num
 
 
@@ -61,3 +61,21 @@ def merge_rds(rds_by_analysis: list, event_map: dict, layer_order: list) -> tupl
             row[f"{l}_GR"] = round(gr[l][eid][0]) if eid in gr[l] else None
         rows.append(row)
     return pd.DataFrame(rows), warnings
+
+
+def annotate(df: pd.DataFrame, event_perils: dict, perils_modelled: set) -> pd.DataFrame:
+    """Add Peril and Status columns: tells 'peril not modelled' from 'no loss' (the workbook left both blank)."""
+    out = df.copy()
+    loss_cols = [c for c in out.columns if c == "GU_Loss" or c.endswith("_GR")]
+    perils = [event_perils.get(str(e), "") for e in out["Eventid"]]
+    out.insert(2, "Peril", [PERIL_NAMES.get(p, p) for p in perils])
+    status = []
+    for p, (_, row) in zip(perils, out.iterrows()):
+        if any(pd.notna(row[c]) and row[c] for c in loss_cols):
+            status.append("Loss")
+        elif p and p not in perils_modelled:
+            status.append("Peril not modelled")
+        else:
+            status.append("No loss")
+    out["Status"] = status
+    return out
