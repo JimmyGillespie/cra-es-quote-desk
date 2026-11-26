@@ -1,4 +1,3 @@
-
 """CRA E&S Quote Desk - Streamlit rebuild of CRA_E&S_Template.xlsm.
 
     Account -> Exposure -> Hazards -> Analyses -> Results -> Report
@@ -20,9 +19,9 @@ from cra.config import Settings, default_store_roots, env_getter           # noq
 from cra.rms.demo import DemoService                                       # noqa: E402
 from cra.rms.service import RmsService                                     # noqa: E402
 from cra.store import AccountStore                                         # noqa: E402
-from views import account, analyses, common, exposure, hazards, report, results   # noqa: E402
+from views import account, analyses, common, exposure, hazards, layers, report, results   # noqa: E402
 
-VIEWS = {"account": account, "exposure": exposure, "hazards": hazards, "analyses": analyses, "results": results, "report": report}
+VIEWS = {"account": account, "exposure": exposure, "hazards": hazards, "layers": layers, "analyses": analyses, "results": results, "report": report}
 
 
 def _secrets() -> dict:
@@ -40,7 +39,7 @@ def _store(roots: tuple) -> AccountStore:
 @st.cache_resource(show_spinner=False)
 def _service(sig: str, _settings: Settings, demo: bool):
     if demo:
-        return DemoService()
+        return DemoService(preseed=True)
     return RmsService(_settings.creds()) if _settings.riskdata_key else None
 
 
