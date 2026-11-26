@@ -10,7 +10,7 @@ Where each request shape comes from (RMS developer portal, read when this was wr
   [docs]    PUT  .../exposures/{id}/policies/{pid}          policy: partOf, attachmentPoint, blanketLimit ...
                                                            (field names confirmed on the Risk Modeler v1 policy; the
                                                             Platform page shows the same policy model)
-  [assumed] settings keys newName / newNumber / linkExistingAccounts for the copy job (the docs say the copy "must be
+  [assumed] settings keys name / number / linkExistingAccounts for the copy job (the docs say the copy "must be
             renamed" and that portfolios link to existing child accounts unless told otherwise, but the page does not
             list the key names) - they are editable in the app and the portfolio is renamed explicitly afterwards.
   [assumed] GET/PUT .../portfolios/{pid} to rename a portfolio; GET .../accounts and GET .../policies?filter=...
@@ -75,7 +75,7 @@ def norm_policy(it: dict) -> dict:
 # ---------------------------------------------------------------- request bodies (pure, so they can be shown and tested)
 def copy_body(exposure_id, base_portfolio_id, name: str, number: str, settings: dict | None = None) -> dict:
     s = dict(DEFAULT_COPY_SETTINGS)
-    s.update({"newName": name, "newNumber": number})
+    s.update({"name": name, "number": number})
     s.update(settings or {})
     return {"resourceUri": f"/platform/riskdata/v1/exposures/{exposure_id}/portfolios/{base_portfolio_id}",
             "resourceType": "PORTFOLIO", "settings": s}
