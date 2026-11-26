@@ -1,1 +1,61 @@
-
+{
+  "_note": "RDS scenario events (mod_RDS.bas GetEventMap). 'peril' = the model that produces the event, used to tell 'peril not run' from 'no loss'. Edit here to add events.",
+  "events": {
+    "2874165": {
+      "name": "North East Windstorm",
+      "peril": "WS"
+    },
+    "2867710": {
+      "name": "Carolinas Windstorm",
+      "peril": "WS"
+    },
+    "2848918": {
+      "name": "Gulf of Mexico Windstorm",
+      "peril": "WS"
+    },
+    "2865409": {
+      "name": "Miami-Dade Windstorm",
+      "peril": "WS"
+    },
+    "2869298": {
+      "name": "Pinellas Windstorm",
+      "peril": "WS"
+    },
+    "15022534": {
+      "name": "Los Angeles EQ",
+      "peril": "EQ"
+    },
+    "15006191": {
+      "name": "San Francisco EQ",
+      "peril": "EQ"
+    },
+    "15355285": {
+      "name": "New Madrid RDS EQ",
+      "peril": "EQ"
+    },
+    "15631361": {
+      "name": "PNW/BC EQ 100yr",
+      "peril": "EQ"
+    },
+    "15631695": {
+      "name": "PNW/BC EQ 250yr",
+      "peril": "EQ"
+    },
+    "15623863": {
+      "name": "PNW/BC EQ 500yr",
+      "peril": "EQ"
+    },
+    "15669240": {
+      "name": "Quebec EQ 100yr",
+      "peril": "EQ"
+    },
+    "15675523": {
+      "name": "Quebec EQ 250yr",
+      "peril": "EQ"
+    },
+    "15666680": {
+      "name": "Quebec EQ 500yr",
+      "peril": "EQ"
+    }
+  }
+}
