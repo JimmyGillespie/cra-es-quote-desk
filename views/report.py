@@ -5,10 +5,10 @@ from pathlib import Path
 
 import streamlit as st
 
-from cra import graph
+from cra import charts, graph
 from cra.rules.naming import folder_name_from_exposure, now_stamp, report_file_name
 
-from .common import ctx, flags, kpis, money, need_account, section, uk_dt
+from .common import ctx, finding_boxes, flags, kpis, money, need_account, section
 from .exposure import _token
 
 
@@ -23,15 +23,22 @@ def render():
         st.info("Pull results first (Results step).", icon=":material/arrow_back:")
         return
     section("Build the workbook")
-    rec = inp["recon"] or {}
+    rec, rev = inp["recon"] or {}, inp["review"]
     kpis([("Layers", str(len({a["layer"] for a in inp["records"]})), None), ("Analyses", str(len(inp["records"])), None),
-          ("Locations", f"{rec.get('locations', 0):,}", None), ("TIV modelled", money(rec.get("tiv_modelled")), None)])
+          ("Locations", f"{rec.get('locations', 0):,}" if rec else "not loaded", None),
+          ("TIV modelled", charts.fmt_money(rec.get("tiv_modelled")) if rec else "-", None),
+          ("Review", f"{rev['counts']['red']} red · {rev['counts']['amber']} amber", "first tab of the workbook")])
     st.write("")
+    if not rec:
+        st.info("Locations are not loaded, so the workbook will have no Exposure Summary, Locations or Map tabs and the review has no data checks. "
+                "Load them on the Exposure step if you want them.", icon=":material/info:")
+    reds = [f for f in rev["findings"] if f["level"] == "red"]
+    if reds:
+        finding_boxes(reds, ("red",))
     flags(inp["warnings"])
-    blocking = [m for l, m in inp["warnings"] if l == "error"]
     go = True
-    if blocking:
-        go = st.checkbox("I have reviewed the errors above and want to build the report anyway")
+    if reds or any(l == "error" for l, _m in inp["warnings"]):
+        go = st.checkbox("I have reviewed the red flags / errors above and want to build the report anyway")
     stamp_name = report_file_name(sub["exposure_name"], now_stamp())
     if st.button("Build report", type="primary", disabled=not go):
         with st.spinner("Building the workbook..."):
@@ -81,7 +88,7 @@ def render():
         return
     atts = [(name, cur, graph.XLSX_MIME)]
     subject = ("RE: " + sub["email_subject"]) if sub.get("email_subject") else f"Results for {sub['exposure_name']}"
-    tok, err = _token()
+    tok, _err = _token()
     if sub.get("email_id") and tok:
         if st.button("Create reply draft in the shared mailbox"):
             try:
@@ -93,7 +100,6 @@ def render():
             except graph.GraphError as exc:
                 st.error(str(exc))
     else:
-        st.caption("Link the submission e-mail on the Exposure step and sign in to Microsoft to create the draft here. "
-                   "Otherwise download an e-mail file and open it in Outlook.")
+        st.caption("Link the submission e-mail on the Exposure step and sign in to Microsoft to create the draft here. Otherwise download an e-mail file and open it in Outlook.")
     eml = graph.build_eml(sub.get("email_to", []), subject, graph.reply_body(sub["exposure_name"], sub.get("underwriter", "")), atts)
     st.download_button("Download e-mail draft (.eml)", eml, file_name="CRA_results_draft.eml", mime="message/rfc822")
