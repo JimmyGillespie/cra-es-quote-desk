@@ -17,11 +17,11 @@
     ".streamlit/config.toml": {
       "checksum": "f4438f2f7ef31e5ac6a2bca2f1953cf8"
     },
-    "README.md": {
-      "checksum": "35f5a59028a6ef997db8f29f77a1893e"
-    },
     "app.py": {
-      "checksum": "f2c1d6e9d0fa5550bd0d842b15c63200"
+      "checksum": "9f02dbb7f750e00235c1c538bbcc1e4b"
+    },
+    "apply_layering.py": {
+      "checksum": "1509f11078c03602866cb471e255d928"
     },
     "cra/__init__.py": {
       "checksum": "78b4838c1739b15e807b4093290ca432"
@@ -53,8 +53,11 @@
     "cra/graph.py": {
       "checksum": "cb7f7402038ae7149c2e2c6283e550ab"
     },
+    "cra/layering.py": {
+      "checksum": "11284182caa65fefc6818ce02e3fd308"
+    },
     "cra/pipeline.py": {
-      "checksum": "781a75c589c11d1fb2b8af2c8a7a0710"
+      "checksum": "2338cca59ae6abafab52ec0eac655560"
     },
     "cra/report/__init__.py": {
       "checksum": "d41d8cd98f00b204e9800998ecf8427e"
@@ -70,6 +73,12 @@
     },
     "cra/rms/demo.py": {
       "checksum": "e1f14d6bfed5706d16f73253e2aebbc4"
+    },
+    "cra/rms/demo_layering.py": {
+      "checksum": "dd8734f496c93189df6e7c540508e6fd"
+    },
+    "cra/rms/layer_api.py": {
+      "checksum": "8f46cb5265fcb7cc8998c65114ee81aa"
     },
     "cra/rms/service.py": {
       "checksum": "556c698208043197836a41e0bf4753df"
@@ -110,6 +119,9 @@
     "cra/store.py": {
       "checksum": "c1271fe546d36d4a0d17d9a37b4cde52"
     },
+    "README.md": {
+      "checksum": "35f5a59028a6ef997db8f29f77a1893e"
+    },
     "requirements.txt": {
       "checksum": "c40776e58ed0faea2f7615c2026bd22e"
     },
@@ -123,13 +135,16 @@
       "checksum": "9e9815b01e8a10c33fa220e89b0aa9fa"
     },
     "views/common.py": {
-      "checksum": "48c2636c69a2106e69a0b04aae702a50"
+      "checksum": "780b16d6d5a35d090025e90cfbd658a9"
     },
     "views/exposure.py": {
       "checksum": "abe47682310ca9d835ca1adaf0b3400f"
     },
     "views/hazards.py": {
       "checksum": "a75ebeab7c3dc71f7bff93779818d169"
+    },
+    "views/layering.py": {
+      "checksum": "3bef116e8d7d69f0d1f495e10e2e28c5"
     },
     "views/report.py": {
       "checksum": "e9fdab83c8db46385ac61a0f12f211d7"
