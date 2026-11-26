@@ -165,3 +165,4 @@ class DemoLayerApi:
         label = (pf["name"].split("_", 1)[0]) if pf else ""
         if label and not any(x[0] == label for x in _demo.LAYERS):
             _demo.LAYERS.append((label, float(attachment), float(limit)))
+
