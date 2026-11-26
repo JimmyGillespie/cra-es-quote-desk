@@ -8,38 +8,50 @@ DATA_DIR = Path(__file__).parent / "data"
 
 # mod_EP.bas  RP_LIST
 RP_LIST = [10000, 5000, 1000, 500, 250, 200, 100, 50, 25, 10, 5, 2]
-# mod_RDS.bas  EXPOSURE_TYPE / API_LIMIT
-EXPOSURE_TYPE = 8017
+EXPOSURE_TYPE = 8017                 # mod_RDS.bas
 RDS_API_LIMIT = 1000
-LOC_PAGE_LIMIT = 1000            # Get_Loc_Hazard_Refresh_ALL.bas  pageSize
-EDM_PAGE_LIMIT = 100             # Get_EDMandPort.bas  limit
-PORTFOLIO_PAGE_LIMIT = 200       # Get_EDMandPort.bas  limit
-ANALYSES_PAGE_SIZE = 5000        # Get_Analyses.bas  size=5000
+LOC_PAGE_LIMIT = 1000                # Get_Loc_Hazard_Refresh_ALL.bas pageSize
+EDM_PAGE_LIMIT = 100                 # Get_EDMandPort.bas
+PORTFOLIO_PAGE_LIMIT = 200
+ANALYSES_PAGE_SIZE = 5000            # Get_Analyses.bas size=5000
 
 PERSPECTIVES = ("GU", "GR", "RL")
 
-# EP sheets: column order and headings (EP GrUp / layer tabs rows 5-6)
+# EP tabs: column order and headings (EP GrUp / layer tabs rows 5-6)
 PERIL_COLUMNS = [("YY", "All Perils"), ("WS", "Windstorm"), ("EQ", "EQ"), ("CS", "SCS"),
                  ("WT", "Winterstorm"), ("WF", "Wildfire"), ("FL", "Flood"), ("TR", "Terrorism")]
-# RunAnalysis.bas uses TO / FR / (HU) as model labels; the EP tabs key on the RMS perilCode.
-PERIL_ALIASES = {"TO": "CS", "FR": "WF", "HU": "WS"}
+PERIL_ALIASES = {"TO": "CS", "FR": "WF", "HU": "WS"}      # RunAnalysis.bas labels -> RMS perilCode
+PERIL_NAMES = {"YY": "All Perils", "WS": "Windstorm", "EQ": "Earthquake", "CS": "Severe convective storm",
+               "WT": "Winterstorm", "WF": "Wildfire", "FL": "Flood", "TR": "Terrorism"}
+PERIL_FROM_TEXT = {"multi-peril": "YY", "windstorm": "WS", "hurricane": "WS", "earthquake": "EQ",
+                   "severe convective storm": "CS", "winterstorm": "WT", "wildfire": "WF", "flood": "FL",
+                   "terrorism": "TR"}
 
-# Probability shown beside each return period on the EP tabs
+# One consistent, restrained palette for every chart (app and workbook)
+PERIL_COLORS = {"YY": "#0B2545", "WS": "#2F6DB5", "EQ": "#B5651D", "CS": "#2A9D8F", "WT": "#8A9BB5",
+                "WF": "#C8434B", "FL": "#3A86FF", "TR": "#6D597A"}
+SERIES_COLORS = ["#0B2545", "#2F6DB5", "#C8434B", "#2A9D8F", "#B5651D", "#6D597A", "#8A9BB5", "#E0A100"]
+
 RP_PROBABILITY = {10000: 0.0001, 5000: 0.0002, 1000: 0.001, 500: 0.002, 250: 0.004, 200: 0.005,
                   100: 0.01, 50: 0.02, 25: 0.04, 10: 0.1, 5: 0.2, 2: 0.5}
-HIGHLIGHT_RP = 250               # the shaded row on the EP tabs
+HIGHLIGHT_RP = 250
+TAIL_RP = 1000                       # return periods at or above this are 'tail' for reliability checks
 
 GROUPING_TERMINAL = {"FINISHED", "FAILED", "CANCELED", "CANCELLED"}
 GROUPING_ACTIVE = {"PENDING", "QUEUED", "RUNNING", "CANCEL_REQUESTED", "CANCELING"}
 WORKFLOW_TERMINAL = {"FINISHED", "SUCCEEDED", "COMPLETED", "FAILED", "CANCELLED", "CANCELED", "ERROR"}
 WORKFLOW_SUCCESS = {"FINISHED", "SUCCEEDED", "COMPLETED"}
 
-# Controls!B26:B28 (TIV Reported vs Modelled).  The workbook only displayed the delta; the app flags it.
+# Review thresholds (the AI Summary spec on Controls: 'TIV delta > 5%', 'RED if majority', ...)
 TIV_DELTA_WARN = 0.05
 TIV_DELTA_ALERT = 0.10
+LARGEST_LOC_WARN = 0.10
+COUNTY_CONC_WARN = 0.50
+DUP_COORD_WARN = 0.10
+CV_MATERIAL = 500
+PP_MATERIAL_SHARE = 0.05
 
 DEFAULT_RMS_HOST = "api-euw1.rms.com"
-# Find_Emails.bas / SaveFile.bas
 DEFAULT_MAILBOX = "exposuremanagement@amtrustgroup.com"
 DEFAULT_QUOTES_ROOT = r"\\uk1nas02\Exposure_Management\AmTrust US\Property\E&S\Quotes\2026"
 
@@ -77,7 +89,13 @@ STATE_CODE_TO_NAME = {v: k for k, v in STATE_NAME_TO_CODE.items()}
 
 
 def load_events() -> dict:
-    return dict(json.loads((DATA_DIR / "events.json").read_text(encoding="utf-8"))["events"])
+    """{eventId: name} for the RDS Events tab."""
+    return {k: v["name"] for k, v in json.loads((DATA_DIR / "events.json").read_text(encoding="utf-8"))["events"].items()}
+
+
+def load_event_perils() -> dict:
+    """{eventId: peril code} - which peril model produces each RDS event."""
+    return {k: v["peril"] for k, v in json.loads((DATA_DIR / "events.json").read_text(encoding="utf-8"))["events"].items()}
 
 
 def load_profiles() -> dict:
