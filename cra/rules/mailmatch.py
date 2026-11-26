@@ -1,8 +1,6 @@
-"""Find the underwriter's submission email for an EDM (Find_Emails.bas FindTopEmailMatchSingle_Solid).
+"""Find the underwriter's submission e-mail for an EDM (Find_Emails.bas FindTopEmailMatchSingle_Solid).
 
 Pure scoring over message dicts {id, subject, body, sent}; the Graph call that supplies the messages is in cra/graph.py.
-Same scoring as the macro: Levenshtein similarity of subject / account name to the normalised EDM name, a small
-token-coverage bonus, +0.15 for each phrase hit, at least two token hits required, score capped at 1.
 """
 from __future__ import annotations
 
@@ -25,8 +23,7 @@ def normalize_exposure_name(s: str) -> str:
         tail = t[i + 1:]
         if tail[:1].lower() == "y" and tail[1:].isdigit():
             t = t[:i]
-    t = t.replace("_", " ")
-    return re.sub(r" {2,}", " ", t).strip().lower()
+    return re.sub(r" {2,}", " ", t.replace("_", " ")).strip().lower()
 
 
 def normalize_subject(s: str) -> str:
@@ -68,8 +65,7 @@ def extract_value(txt: str, label: str) -> str:
     m = re.search(re.escape(label), txt or "", re.I)
     if not m:
         return ""
-    rest = (txt or "")[m.end():]
-    return rest.split("\r\n", 1)[0].split("\n", 1)[0].strip()
+    return (txt or "")[m.end():].split("\r\n", 1)[0].split("\n", 1)[0].strip()
 
 
 def extract_any(txt: str, labels: list) -> str:
@@ -91,8 +87,7 @@ def find_best(exposure_name: str, messages: list) -> dict | None:
         acct = canonical(extract_any(body, ACCOUNT_LABELS).lower())
         lev_s = levenshtein_ratio(subj, target)
         lev_a = levenshtein_ratio(acct, target) if acct else 0.0
-        hits = token_hits(tokens, subj)
-        if hits + token_hits(tokens, acct) < 2 and len(tokens) > 1:
+        if token_hits(tokens, subj) + token_hits(tokens, acct) < 2 and len(tokens) > 1:
             continue
         bonus = (0.15 if target and target in subj else 0.0) + (0.15 if acct and target in acct else 0.0)
         score = min(1.0, max(lev_s, lev_a) + 0.1 * max(coverage(tokens, subj), coverage(tokens, acct)) + bonus)
@@ -105,8 +100,7 @@ def find_best(exposure_name: str, messages: list) -> dict | None:
     body = best.get("body", "") or ""
     return {
         "message": best, "score": round(best_score, 3), "lev_subject": round(best_lev, 3),
-        "account": extract_any(body, ACCOUNT_LABELS + ["Insured:"]),
-        "priority": extract_any(body, ["Priority:", "Prio:"]),
+        "account": extract_any(body, ACCOUNT_LABELS + ["Insured:"]), "priority": extract_any(body, ["Priority:", "Prio:"]),
         "underwriter": extract_any(body, ["Underwriter:", "UW:"]),
         "tiv": extract_any(body, ["TIV:", "Total Insured Value:", "TIV (USD):"]),
         "comments": extract_any(body, ["Comments:", "Notes:", "Remark:"]),
