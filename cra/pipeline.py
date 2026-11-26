@@ -4,21 +4,22 @@ restarted app or a second user never loses work, and a step can be re-run on its
 """
 from __future__ import annotations
 
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 import pandas as pd
 
-from .constants import (ALL_LOC_COLUMNS, GROUPING_ACTIVE, GROUPING_TERMINAL, HAZARD_COLUMNS, PERSPECTIVES,
-                        WORKFLOW_SUCCESS, WORKFLOW_TERMINAL, load_events, load_profiles)
+from .constants import (ALL_LOC_COLUMNS, GROUPING_TERMINAL, HAZARD_COLUMNS, PERSPECTIVES, WORKFLOW_SUCCESS,
+                        WORKFLOW_TERMINAL, load_event_perils, load_events, load_profiles)
 from .rms.core import gj
 from .rms.service import RmsService
 from .rules import ep as ep_rules
 from .rules import hazards as hz
 from .rules import locations as loc_rules
-from .rules.layers import extract_layer
-from .rules.matching import classify_analysis
+from .rules import matching, review
+from .rules.layers import assign_layer
 from .rules.rds import merge_rds
 from .store import AccountStore, now_iso
 
@@ -27,6 +28,10 @@ Progress = Callable[[float, str], None]
 
 def _np(_f: float, _m: str) -> None:
     pass
+
+
+def _is_error(h: dict) -> bool:
+    return any(h.get(k) == "Error" for k in ("floodZone", "soilDescription", "mmi100yr"))
 
 
 class AccountPipeline:
@@ -48,7 +53,16 @@ class AccountPipeline:
             raise RuntimeError("RMS is not connected - set RISKDATA_API_KEY.")
         return self.svc
 
-    # ------------------------------------------------------------ account creation
+    def _time(self, step: str, t0: float) -> None:
+        t = dict(self.get("timings", {}) or {})
+        t[step] = round(time.time() - t0, 1)
+        t["updated"] = now_iso()
+        self.put("timings", t)
+
+    def timings(self) -> dict:
+        return self.get("timings", {}) or {}
+
+    # ------------------------------------------------------------ account creation / lookup
     @classmethod
     def create(cls, svc, store: AccountStore, exposure_name: str, exposure_id: str, **fields) -> "AccountPipeline":
         aid = store.new_account_id(exposure_id, exposure_name)
@@ -62,11 +76,31 @@ class AccountPipeline:
             raise OSError(rep.text())
         return p
 
+    @classmethod
+    def existing_for(cls, svc, store: AccountStore, exposure_id: str) -> "AccountPipeline | None":
+        for m in store.list_accounts():
+            if str(m.get("exposure_id")) == str(exposure_id):
+                return cls(svc, store, m["account_id"])
+        return None
+
+    @classmethod
+    def open_results(cls, svc, store: AccountStore, exposure_name: str, exposure_id: str, all_analyses: list,
+                     progress: Progress = _np, include_rl: bool = True, with_rds: bool = True, **fields) -> "AccountPipeline":
+        """One call: open (or create) the quote for an EDM, find its analyses in RMS and pull the results."""
+        p = cls.existing_for(svc, store, exposure_id) or cls.create(svc, store, exposure_name, exposure_id, **fields)
+        progress(0.02, "Reading the EDM's portfolios")
+        p.refresh_portfolios()
+        progress(0.08, "Matching analyses to the EDM")
+        items = p.refresh_analyses(all_analyses)
+        ids = [a["analysisId"] for a in items if a["selected"]]
+        if not ids:
+            raise LookupError("No analyses were found in RMS for this EDM.")
+        p.pull_results(ids, include_rl=include_rl, with_rds=with_rds, progress=lambda f, m: progress(0.1 + 0.9 * f, m))
+        return p
+
     # ------------------------------------------------------------ step 1: portfolios / layers
     def refresh_portfolios(self) -> list:
-        svc = self._need_svc()
-        sub = self.submission()
-        ports = svc.list_portfolios(sub["exposure_id"])
+        ports = self._need_svc().list_portfolios(self.submission()["exposure_id"])
         self.put("portfolios", {"fetched": now_iso(), "items": ports})
         return ports
 
@@ -74,15 +108,11 @@ class AccountPipeline:
         return (self.get("portfolios", {}) or {}).get("items", [])
 
     def layer_order(self) -> list:
-        seen, out = set(), []
-        for p in self.portfolios():
-            if p["layer"] and p["layer"] not in seen:
-                seen.add(p["layer"])
-                out.append(p["layer"])
-        return out
+        return list(dict.fromkeys(p["layer"] for p in self.portfolios() if p["layer"]))
 
     # ------------------------------------------------------------ step 2: exposure
     def load_exposure(self, progress: Progress = _np, workers: int = 8) -> pd.DataFrame:
+        t0 = time.time()
         svc = self._need_svc()
         sub = self.submission()
         eid, name = sub["exposure_id"], sub["exposure_name"]
@@ -93,28 +123,23 @@ class AccountPipeline:
         details = svc.fetch_location_details(eid, ids, workers=workers,
                                              progress=lambda d, n: progress(0.15 + 0.8 * d / max(n, 1), f"Cover splits {d:,}/{n:,}"))
         failed = [i for i in ids if details.get(i) is None]
-        rows = [loc_rules.build_location_row(lw, details.get(i), name) for lw, i in zip(raw, ids)]
-        df = loc_rules.rows_to_frame(rows)
-        # keep hazards already fetched for the same points
-        cache = (self.get("hazards", {}) or {}).get("cache", {})
-        df = self._apply_hazards(df, cache)
+        df = loc_rules.rows_to_frame([loc_rules.build_location_row(lw, details.get(i), name) for lw, i in zip(raw, ids)])
+        df = self._apply_hazards(df, (self.get("hazards", {}) or {}).get("cache", {}))
         rep = self.put("locations", {"fetched": now_iso(), "rms_count": len(raw), "detail_failures": len(failed),
                                      "rows": df.to_dict("records")}, compress=True)
         if not rep.ok:
             raise OSError(rep.text())
+        self._time("locations", t0)
         progress(1.0, f"{len(df):,} locations saved")
         return self.locations()
 
     def all_locations(self) -> pd.DataFrame | None:
-        """Every location RMS returned, whatever the account selection."""
         d = self.get("locations")
-        if not d:
-            return None
-        return pd.DataFrame(d["rows"], columns=ALL_LOC_COLUMNS)
+        return pd.DataFrame(d["rows"], columns=ALL_LOC_COLUMNS) if d else None
 
     def account_mode(self) -> tuple:
         sub = self.submission()
-        return sub.get("account_mode", "all"), sub.get("accounts", [])
+        return sub.get("account_mode", "latest"), sub.get("accounts", [])
 
     def set_account_mode(self, mode: str, accounts: list | None = None) -> None:
         sub = self.submission()
@@ -122,7 +147,6 @@ class AccountPipeline:
         self.put("submission", sub)
 
     def locations(self) -> pd.DataFrame | None:
-        """Locations for the chosen account selection (all accounts / latest account / picked accounts)."""
         df = self.all_locations()
         if df is None:
             return None
@@ -130,8 +154,7 @@ class AccountPipeline:
         return loc_rules.filter_accounts(df, mode, accts)
 
     def exposure_check(self) -> dict | None:
-        d = self.get("locations")
-        df = self.locations()
+        d, df = self.get("locations"), self.locations()
         if d is None or df is None:
             return None
         mode, _a = self.account_mode()
@@ -148,16 +171,14 @@ class AccountPipeline:
         df = df.copy()
         for i, r in df.iterrows():
             ok, code = hz.eligible(r.to_dict())
-            if not ok:
-                continue
-            h = cache.get(hz.hazard_key(r["Latitude"], r["Longitude"], code))
-            if h:
-                for c in HAZARD_COLUMNS:
-                    df.at[i, c] = h.get(c)
+            if ok:
+                h = cache.get(hz.hazard_key(r["Latitude"], r["Longitude"], code))
+                if h:
+                    for c in HAZARD_COLUMNS:
+                        df.at[i, c] = h.get(c)
         return df
 
     def hazard_plan(self) -> dict:
-        """How many distinct points still need LI calls (so the user sees the charge before pressing the button)."""
         df = self.locations()
         if df is None:
             return {"locations": 0, "eligible": 0, "unique_points": 0, "cached": 0, "to_fetch": 0}
@@ -169,16 +190,15 @@ class AccountPipeline:
                 elig += 1
                 keys.add(hz.hazard_key(r["Latitude"], r["Longitude"], code))
         cached = sum(1 for k in keys if k in cache and not _is_error(cache[k]))
-        return {"locations": len(df), "eligible": elig, "unique_points": len(keys), "cached": cached,
-                "to_fetch": len(keys) - cached}
+        return {"locations": len(df), "eligible": elig, "unique_points": len(keys), "cached": cached, "to_fetch": len(keys) - cached}
 
     def enrich_hazards(self, progress: Progress = _np, workers: int = 4, batch: int = 40, retry_errors: bool = True) -> dict:
+        t0 = time.time()
         svc = self._need_svc()
         df = self.locations()                       # what the user selected - only these are charged
         if df is None:
             raise RuntimeError("Load the exposure first.")
-        hdata = self.get("hazards", {}) or {}
-        cache = dict(hdata.get("cache", {}))
+        cache = dict((self.get("hazards", {}) or {}).get("cache", {}))
         todo = {}
         for _, r in df.iterrows():
             ok, code = hz.eligible(r.to_dict())
@@ -186,8 +206,7 @@ class AccountPipeline:
                 k = hz.hazard_key(r["Latitude"], r["Longitude"], code)
                 if k not in cache or (retry_errors and _is_error(cache[k])):
                     todo[k] = (r["Latitude"], r["Longitude"], code)
-        keys = list(todo)
-        done = 0
+        keys, done = list(todo), 0
         for i in range(0, len(keys), batch):
             chunk = keys[i:i + batch]
             with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -199,30 +218,25 @@ class AccountPipeline:
             progress(done / max(len(keys), 1), f"Hazards {done:,}/{len(keys):,} points")
             if not rep.ok:
                 raise OSError(rep.text())
-        full = self.all_locations()
-        d = self.get("locations")
+        full, d = self.all_locations(), self.get("locations")
         self.put("locations", {**{k: v for k, v in d.items() if k != "rows"},
                                "rows": self._apply_hazards(full, cache).to_dict("records")}, compress=True)
-        errs = sum(1 for k in todo if _is_error(cache.get(k, {})))
-        return {"requested": len(keys), "errors": errs}
+        self._time("hazards", t0)
+        return {"requested": len(keys), "errors": sum(1 for k in todo if _is_error(cache.get(k, {})))}
 
     # ------------------------------------------------------------ step 4: analyses
     def refresh_analyses(self, all_analyses: list | None = None, log=lambda m: None) -> list:
-        svc = self._need_svc()
+        svc = self._need_svc() if all_analyses is None else self.svc
         sub = self.submission()
-        edm = sub["exposure_name"]
         items = all_analyses if all_analyses is not None else svc.list_analyses(log)
-        prev = {a["analysisId"]: a for a in (self.get("analyses", {}) or {}).get("items", [])}
-        out = []
-        for a in items:
-            why = classify_analysis(edm, a)
-            if not why:
-                continue
-            a = dict(a)
-            a["match"] = why
-            a["layer"] = extract_layer(a["analysisName"])
-            a["selected"] = prev[a["analysisId"]]["selected"] if a["analysisId"] in prev else (why == "exact EDM")
-            out.append(a)
+        prev = {a["analysisId"]: a["selected"] for a in self.analyses()}
+        out = matching.select_for_edm(sub["exposure_name"], items, self.portfolios(), previous_selection=prev)
+        # a NEW run replaces the previous one for the same layer + peril unless the user chose otherwise
+        new_keys = {(a["layer"], a["perilCode"]) for a in out if a["analysisId"] not in prev and a["selected"]}
+        for a in out:
+            if a["analysisId"] in prev and (a["layer"], a["perilCode"]) in new_keys:
+                a["selected"] = False
+                a["superseded"] = True
         self.put("analyses", {"fetched": now_iso(), "items": out})
         return out
 
@@ -236,41 +250,49 @@ class AccountPipeline:
         self.put("analyses", d)
 
     def pull_results(self, analysis_ids: list, include_rl: bool = True, progress: Progress = _np, with_rds: bool = True) -> dict:
+        t0 = time.time()
         svc = self._need_svc()
         persp = PERSPECTIVES if include_rl else ("GU", "GR")
+        stored = {a["analysisId"]: a for a in self.analyses()}
+        ports = self.portfolios()
         records, errors = [], []
         n = len(analysis_ids)
         for i, aid in enumerate(analysis_ids):
-            progress(i / max(n, 1), f"EP results {i + 1}/{n} (analysis {aid})")
+            progress(i / max(n, 1) * (0.6 if with_rds else 1.0), f"EP results {i + 1}/{n} (analysis {aid})")
             rec = svc.fetch_analysis(aid, persp)
             if rec is None:
                 errors.append(f"Analysis {aid}: metadata could not be read.")
                 continue
-            if not rec["analysisName"]:
-                errors.append(f"Analysis {aid}: no name returned.")
+            rec["layer_raw"] = rec["layer"]
+            rec["layer"] = stored[aid]["layer"] if aid in stored else assign_layer(rec, ports)
+            if not rec["perilCode"] and aid in stored:
+                rec["perilCode"] = stored[aid]["perilCode"]
             records.append(rec)
         cols = ep_rules.results_columns(records)
-        warnings = ep_rules.check_results(records, cols)
         self.put("results", {"fetched": now_iso(), "records": records, "include_rl": include_rl})
-        rds_rows = []
+        rds_rows, rds_warn = [], []
         if with_rds:
             events = self.get("events") or load_events()
             for i, rec in enumerate(records):
-                progress(i / max(len(records), 1), f"RDS {i + 1}/{len(records)}")
+                progress(0.6 + 0.4 * i / max(len(records), 1), f"RDS {i + 1}/{len(records)}")
                 r = svc.fetch_rds(rec, events)
                 rds_rows.append(r)
-                for line in r.get("log", []):
-                    if "skipped" in line:
-                        warnings.append(("info", line))
-            df, w2 = merge_rds(rds_rows, events, self.layer_order())
-            warnings += w2
+            df, rds_warn = merge_rds(rds_rows, events, self.layer_order())
             self.put("rds", {"fetched": now_iso(), "per_analysis": rds_rows, "events": events})
-        self.put("results_check", {"errors": errors, "warnings": warnings})
+        self.put("results_check", {"errors": errors, "rds_warnings": rds_warn})
+        self._time("results", t0)
         progress(1.0, "Results saved")
-        return {"records": len(records), "errors": errors, "warnings": warnings}
+        return {"records": len(records), "errors": errors, "warnings": self.result_checks()}
 
     def results(self) -> list:
         return (self.get("results", {}) or {}).get("records", [])
+
+    def rds_frame(self) -> pd.DataFrame | None:
+        d = self.get("rds")
+        if not d:
+            return None
+        df, _w = merge_rds(d["per_analysis"], d.get("events") or load_events(), self.layer_order())
+        return df
 
     def yy_alias(self) -> set:
         return set((self.get("results_settings", {}) or {}).get("yy_alias", []))
@@ -281,30 +303,35 @@ class AccountPipeline:
     def result_columns(self) -> list:
         return ep_rules.results_columns(self.results(), self.yy_alias())
 
-    # ------------------------------------------------------------ report
+    def result_checks(self) -> list:
+        recs = self.results()
+        if not recs:
+            return []
+        chk = self.get("results_check", {}) or {}
+        out = [("error", e) for e in chk.get("errors", [])]
+        out += ep_rules.check_results(recs, self.result_columns())
+        out += [tuple(w) for w in chk.get("rds_warnings", [])]
+        return out
+
+    # ------------------------------------------------------------ review (the Controls-tab checklist) and report
+    def review(self) -> dict:
+        recs, cols = self.results(), self.result_columns()
+        return review.run_review(sub=self.submission(), locations=self.locations(), recon=self.exposure_check(),
+                                 portfolios=self.portfolios(), records=recs, cols=cols, rds_df=self.rds_frame(),
+                                 event_perils=load_event_perils(), layer_order=self.layer_order(),
+                                 result_checks=self.result_checks())
+
     def report_inputs(self) -> dict:
         recs = self.results()
-        cols = ep_rules.results_columns(recs, self.yy_alias())
-        warnings = list((self.get("results_check", {}) or {}).get("warnings", []))
-        recon = self.exposure_check()
-        if recon:
-            warnings = list(recon["flags"]) + warnings
+        recon, rev = self.exposure_check(), self.review()
+        warnings = (list(recon["flags"]) if recon else []) + self.result_checks()
         return {"submission": self.submission(), "locations": self.locations(), "recon": recon, "records": recs,
                 "layer_order": self.layer_order(), "rds": self.rds_frame(), "warnings": warnings, "yy_alias": self.yy_alias(),
-                "n_columns": len(cols)}
+                "review": rev, "timings": self.timings(), "event_perils": load_event_perils()}
 
     def build_report(self) -> bytes:
         from .report.excel import build_workbook
-        inp = self.report_inputs()
-        inp.pop("n_columns", None)
-        return build_workbook(**inp)
-
-    def rds_frame(self) -> pd.DataFrame | None:
-        d = self.get("rds")
-        if not d:
-            return None
-        df, _w = merge_rds(d["per_analysis"], d.get("events") or load_events(), self.layer_order())
-        return df
+        return build_workbook(**self.report_inputs())
 
     # ------------------------------------------------------------ jobs: analysis submission + grouping
     def jobs(self) -> list:
@@ -327,10 +354,10 @@ class AccountPipeline:
         perils = {p["code"]: p for p in prof["perils"]}
         jobs, results = self.jobs(), []
         todo = [(pid, code) for pid in portfolio_ids for code in peril_codes]
+        bad = ("FAILED", "SUBMIT_FAILED", "CANCELLED", "CANCELED", "ERROR")
         for i, (pid, code) in enumerate(todo):
             progress(i / max(len(todo), 1), f"Submitting portfolio {pid} / {code}")
-            existing = [j for j in jobs if j["kind"] == "analysis" and j["portfolio_id"] == str(pid) and j["peril"] == code
-                        and j["status"] not in ("FAILED", "SUBMIT_FAILED", "CANCELLED", "CANCELED", "ERROR")]
+            existing = [j for j in jobs if j["kind"] == "analysis" and j["portfolio_id"] == str(pid) and j["peril"] == code and j["status"] not in bad]
             if existing and not force:
                 results.append({"portfolio_id": pid, "peril": code, "skipped": f"already {existing[0]['status']}"})
                 continue
@@ -339,41 +366,41 @@ class AccountPipeline:
                                     prof["output_profile_id"], prof["currency"], prof["global_analysis_settings"])
             job = {"id": uuid.uuid4().hex[:10], "kind": "analysis", "portfolio_id": str(pid),
                    "portfolio_name": (by_pid.get(str(pid)) or {}).get("portfolio_name", ""),
-                   "layer": (by_pid.get(str(pid)) or {}).get("layer", ""), "peril": code,
-                   "job_id": r["job_id"], "status": "SUBMITTED" if r["ok"] else "SUBMIT_FAILED", "progress": None,
-                   "submitted": now_iso(), "last_polled": None, "status_url": "",
-                   "error": "" if r["ok"] else f"HTTP {r['http']}: {r['text']}"}
+                   "layer": (by_pid.get(str(pid)) or {}).get("layer", ""), "peril": code, "job_id": r["job_id"],
+                   "status": "SUBMITTED" if r["ok"] else "SUBMIT_FAILED", "progress": None, "submitted": now_iso(),
+                   "last_polled": None, "status_url": "", "error": "" if r["ok"] else f"HTTP {r['http']}: {r['text']}"}
             jobs.append(job)
             self._save_jobs(jobs)
             results.append({"portfolio_id": pid, "peril": code, "ok": r["ok"], "job_id": r["job_id"], "error": job["error"]})
         return results
 
     def submit_grouping(self, analyses: list, progress: Progress = _np) -> list:
-        """One grouping job per portfolio (Controls!O > 0), exactly as Submit_GroupingJobs_PortfolioID_GT0."""
+        """One grouping job per portfolio (analysis portfolio ID > 0), as Submit_GroupingJobs_PortfolioID_GT0.
+        Existing All Perils results are never members of a group (in the real data they carry a portfolio ID too)."""
         svc = self._need_svc()
         prof = self.profiles()
         groups = {}
         for a in analyses:
-            pid = a.get("exposureResourceId", "")
+            if matching.is_grouped(a):
+                continue
             try:
-                if float(pid) > 0:
-                    groups.setdefault(str(int(float(pid))), []).append(a)
+                if float(a.get("exposureResourceId") or 0) > 0:
+                    groups.setdefault(str(int(float(a["exposureResourceId"]))), []).append(a)
             except ValueError:
                 continue
         jobs, out = self.jobs(), []
+        bad = ("FAILED", "SUBMIT_FAILED", "CANCELED", "CANCELLED")
         for i, (pid, members) in enumerate(groups.items()):
             ids = [m["analysisId"] for m in members]
             sig = ",".join(sorted(ids))
-            if any(j["kind"] == "grouping" and j.get("signature") == sig and j["status"] not in ("FAILED", "SUBMIT_FAILED", "CANCELED", "CANCELLED")
-                   for j in jobs):
+            if any(j["kind"] == "grouping" and j.get("signature") == sig and j["status"] not in bad for j in jobs):
                 out.append({"portfolio_id": pid, "skipped": "already submitted for these analyses"})
                 continue
             progress(i / max(len(groups), 1), f"Grouping portfolio {pid} ({len(ids)} analyses)")
             meta = svc.get_meta(ids[0]) or {}
             name = gj(meta, "analysisName") or f"Grouped_PortfolioID_{pid}"
-            body = svc.grouping_body(ids, name, meta, prof["grouping"], prof["currency"])
-            r = svc.submit_grouping(body)
-            job = {"id": uuid.uuid4().hex[:10], "kind": "grouping", "portfolio_id": pid, "layer": extract_layer(name),
+            r = svc.submit_grouping(svc.grouping_body(ids, name, meta, prof["grouping"], prof["currency"]))
+            job = {"id": uuid.uuid4().hex[:10], "kind": "grouping", "portfolio_id": pid, "layer": members[0].get("layer", ""),
                    "peril": "YY", "analysis_ids": ids, "signature": sig, "name": name, "job_url": r["job_url"],
                    "status": "PENDING" if r["ok"] else "SUBMIT_FAILED", "progress": None, "submitted": now_iso(),
                    "last_polled": None, "error": "" if r["ok"] else r["diag"]}
@@ -415,7 +442,3 @@ class AccountPipeline:
             else:
                 s["active"] += 1
         return s
-
-
-def _is_error(h: dict) -> bool:
-    return any(h.get(k) == "Error" for k in ("floodZone", "soilDescription", "mmi100yr"))
