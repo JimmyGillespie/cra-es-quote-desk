@@ -1,10 +1,7 @@
 """Runtime settings, read from Streamlit secrets / environment variables (Posit Connect: Vars tab).
 
-Variable names follow the EQ-RMS app so the same Posit settings work:
-    RISKDATA_API_KEY   Risk Data + Risk Modeler API key   (fallback: RMS_TOKEN, the AmCat name)
-    LI_API_KEY         Location Intelligence key           (fallback: LI_TOKEN)
-    GROUPING_API_KEY   Grouping API key                    (fallback: RISKDATA_API_KEY, flagged in the UI)
-    GROUPING_RESOURCE_GROUP_ID, RMS_HOST, CRA_STORE_DIR, CRA_SHARE_DIR, CRA_MAILBOX, CRA_QUOTES_ROOT
+RISKDATA_API_KEY (fallback RMS_TOKEN), LI_API_KEY (fallback LI_TOKEN), GROUPING_API_KEY (fallback RISKDATA_API_KEY, flagged
+in the UI), GROUPING_RESOURCE_GROUP_ID, RMS_HOST, CRA_STORE_DIR, CRA_SHARE_DIR, CRA_MAILBOX, CRA_QUOTES_ROOT.
 No key is ever written to disk, logs or exported files.
 """
 from __future__ import annotations
@@ -21,7 +18,6 @@ Getter = Callable[[str], str]
 
 
 def env_getter(secrets: Optional[dict] = None) -> Getter:
-    """Secrets first, then the environment (name matched ignoring case)."""
     def get(name: str) -> str:
         if secrets:
             v = secrets.get(name)
@@ -43,7 +39,7 @@ class Settings:
     riskdata_key: str = ""
     li_key: str = ""
     grouping_key: str = ""
-    grouping_key_source: str = ""          # "GROUPING_API_KEY" | "RISKDATA_API_KEY (fallback)" | ""
+    grouping_key_source: str = ""
     grouping_resource_group_id: str = ""
     verify_ssl: bool = True
     store_dir: str = ""
@@ -78,21 +74,9 @@ class Settings:
                      grouping_key=self.grouping_key, hazard_key=self.li_key,
                      grouping_resource_group_id=self.grouping_resource_group_id, verify=self.verify_ssl)
 
-    def missing(self) -> list:
-        out = []
-        if not self.riskdata_key:
-            out.append("RISKDATA_API_KEY")
-        if not self.li_key:
-            out.append("LI_API_KEY (needed only for hazard enrichment)")
-        return out
-
 
 def default_store_roots(settings: Settings) -> list:
     """Primary (shared mount) first, then a local fallback. Both are written; reads take the newest good copy."""
-    roots = []
-    if settings.share_dir:
-        roots.append(Path(settings.share_dir))
-    else:
-        roots.append(Path("/mnt/from-posit/content/anv-cra-es"))
+    roots = [Path(settings.share_dir) if settings.share_dir else Path("/mnt/from-posit/content/anv-cra-es")]
     roots.append(Path(settings.store_dir) if settings.store_dir else Path.home() / ".cra_es_store")
     return roots
