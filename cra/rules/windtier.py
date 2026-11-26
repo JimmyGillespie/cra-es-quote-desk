@@ -1,7 +1,4 @@
-"""Wind tier lookup (Get_Loc_Hazard_Refresh_ALL.bas CleanWindKey / StripAdmin2Suffix / GetWindTier).
-
-The lookup table is data/wind_tier.csv, copied from the template's WindTier sheet (1,271 counties).
-"""
+"""Wind tier lookup (Get_Loc_Hazard_Refresh_ALL.bas CleanWindKey / StripAdmin2Suffix / GetWindTier); data/wind_tier.csv."""
 from __future__ import annotations
 
 import csv
@@ -25,7 +22,6 @@ def strip_admin2_suffix(admin2: str) -> str:
 
 
 def build_lookup(rows) -> dict:
-    """rows: iterable of (admin1, admin2_rms, admin2, lookup, tier)."""
     d = {}
     for a1, a2rms, a2, look, tier in rows:
         tier = (tier or "").strip() or "N/A"
@@ -51,5 +47,4 @@ def wind_tier(admin1, admin2, lookup: dict | None = None) -> str:
     k = a1 + clean_key(str(admin2 or ""))
     if k in lookup:
         return lookup[k]
-    k = a1 + strip_admin2_suffix(str(admin2 or ""))
-    return lookup.get(k, "N/A")
+    return lookup.get(a1 + strip_admin2_suffix(str(admin2 or "")), "N/A")
