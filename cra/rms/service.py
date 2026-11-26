@@ -1,11 +1,7 @@
 """RMS service layer: every API call the CRA workbook made, in one place.
 
-Endpoints (all from the VBA):
-  riskdata/v1    exposures, portfolios, locations, analyses, ep, stats
-  riskmodeler/v2 portfolios?datasource=, portfolios/{id}/process, analyses/{appId}/elt
-  grouping/v1    jobs
-  li/<layer>/latest   Location Intelligence
-Authorization is the bare key (no 'Bearer'), as in the VBA and the EQ-RMS app.
+Endpoints (from the VBA): riskdata/v1 (exposures, portfolios, locations, analyses, ep, stats), riskmodeler/v2
+(portfolios, process, elt), grouping/v1 (jobs), li/<layer>/latest (Location Intelligence). Authorization is the bare key.
 """
 from __future__ import annotations
 
@@ -17,10 +13,9 @@ from ..constants import (ANALYSES_PAGE_SIZE, EDM_PAGE_LIMIT, EXPOSURE_TYPE, LOC_
                          PORTFOLIO_PAGE_LIMIT, RDS_API_LIMIT)
 from ..rules import ep as ep_rules
 from ..rules import hazards as hz
-from ..rules.layers import extract_layer, layer_from_portfolio_name, limit_group_name
+from ..rules.layers import layer_from_portfolio_name, limit_group_name
 from ..rules.rds import parse_elt
-from .core import (Creds, Http, as_list, clean_key, gj, gobj, gv, json_or_none, key_fingerprint, safe_get,
-                   to_num, url_encode)
+from .core import (Creds, Http, as_list, clean_key, gj, gobj, gv, json_or_none, key_fingerprint, to_num, url_encode)
 
 Log = Callable[[str], None]
 
@@ -41,7 +36,6 @@ class RmsService:
         self.http = http or Http(verify=creds.verify)
         self._rg: str | None = None
 
-    # ------------------------------------------------------------ urls
     @property
     def riskdata(self) -> str:
         return f"https://{self.c.host}/platform/riskdata/v1"
@@ -56,12 +50,11 @@ class RmsService:
             raise RmsError(r.status, url, r.text)
         return json_or_none(r.text)
 
-    # ------------------------------------------------------------ exposures / portfolios  (Get_EDMandPort.bas)
+    # ------------------------------------------------------------ exposures / portfolios (Get_EDMandPort.bas)
     def list_exposures(self, log: Log = _noop) -> list:
         out, offset = [], 0
         while True:
-            url = f"{self.riskdata}/exposures?limit={EDM_PAGE_LIMIT}&offset={offset}"
-            items = as_list(self._get_json(url))
+            items = as_list(self._get_json(f"{self.riskdata}/exposures?limit={EDM_PAGE_LIMIT}&offset={offset}"))
             if not items:
                 break
             for it in items:
@@ -117,7 +110,6 @@ class RmsService:
 
     def fetch_location_details(self, exposure_id: str, loc_ids: list, workers: int = 8,
                                progress: Callable[[int, int], None] | None = None) -> dict:
-        """{loc_id: detail or None}. Failures are returned as None so the caller can count and report them."""
         out, done = {}, 0
         with ThreadPoolExecutor(max_workers=workers) as pool:
             for lid, d in zip(loc_ids, pool.map(lambda i: self.fetch_location_detail(exposure_id, i), loc_ids)):
@@ -183,13 +175,13 @@ class RmsService:
         with ThreadPoolExecutor(max_workers=6) as pool:
             resps = list(pool.map(lambda j: self.http.get(j[2], self.c.riskdata_key), jobs))
         ep_by, st_by, failed = {}, {}, []
-        for (p, kind, url), r in zip(jobs, resps):
+        for (p, kind, _url), r in zip(jobs, resps):
             if kind == "ep":
                 if r.status == 200 and r.text:
                     parsed = ep_rules.parse_ep(r.text)
                     if parsed:
                         ep_by[p] = parsed
-                elif r.status not in (404,):
+                elif r.status != 404:
                     failed.append(f"{p} ep HTTP {r.status}")
             else:
                 st_by[p] = list(ep_rules.parse_stats(r.text)) if (r.status == 200 and r.text) else [None, None, None]
@@ -233,12 +225,6 @@ class RmsService:
                     self._rg = str(items[0].get("resourceGroupId") or items[0].get("id") or "")
         return self._rg
 
-    def list_modeler_portfolios(self, edm_name: str) -> list:
-        """riskmodeler/v2/portfolios?datasource=<edm> -> [{'id', 'name'}] (RunRMSAnalysis step 1)."""
-        j = self._get_json(f"{self.modeler_v2}/portfolios?datasource={url_encode(edm_name)}", self.c.riskmodeler_key)
-        items = j.get("searchItems") if isinstance(j, dict) else as_list(j)
-        return [{"id": gj(i, "id"), "name": gj(i, "name")} for i in (items or []) if isinstance(i, dict)]
-
     def submit_analysis(self, edm_name: str, portfolio_id: str, model_profile_id: int, event_rate_scheme_id: int,
                         output_profile_id: int, currency: dict, global_settings: dict) -> dict:
         url = f"{self.modeler_v2}/portfolios/{portfolio_id}/process"
@@ -261,7 +247,6 @@ class RmsService:
         return {"ok": 200 <= r.status < 300 and bool(job), "http": r.status, "job_id": job, "text": r.text[:500]}
 
     def check_workflow(self, job_id: str, cached_url: str = "") -> tuple:
-        """-> (STATUS, url, text). Probes the three workflow endpoints the EQ-RMS app uses."""
         urls = [cached_url] if cached_url else [
             f"https://{self.c.host}/riskmodeler/v1/workflows/{job_id}",
             f"https://{self.c.host}/platform/v1/workflows/{job_id}",
@@ -344,8 +329,7 @@ class RmsService:
 
     # ------------------------------------------------------------ Location Intelligence
     def hazards(self, lat, lon, code: str) -> dict:
-        base = f"https://{self.c.host}/li"
-        key = self.c.hazard_key
+        base, key = f"https://{self.c.host}/li", self.c.hazard_key
 
         def post(layer: str, body: dict):
             r = self.http.post(f"{base}/{layer}/latest", key, json.dumps(body))
@@ -358,9 +342,7 @@ class RmsService:
         out.update(hz.parse_mmi(post("us_mmi", hz.address_body(lat, lon, code))))
         return out
 
-    # ------------------------------------------------------------ health check
     def test_connections(self) -> list:
-        """One cheap call per key -> [(name, ok, message)]."""
         res = []
 
         def chk(name, url, key, extra=None):
