@@ -2,17 +2,13 @@
 
 Replaces Find_Emails.bas (Outlook Sent Items scan) and ReplyFoundEmail.bas (Outlook reply + .Display). Like the macro,
 the app never sends: it creates a DRAFT in the shared mailbox for a person to review and send.
-
-Token sources, first that works: MSGRAPH_TOKEN (env) -> Posit Connect's Microsoft integration (the viewer's own token)
--> device-code sign-in (MS_TENANT_ID + MS_CLIENT_ID). Scopes needed: Mail.Read.Shared (find), Mail.ReadWrite.Shared (draft).
-NOTE: written against the Graph documentation and unit-tested with a fake HTTP layer; it has not been run against your
-tenant yet.
+Token sources: MSGRAPH_TOKEN (env) -> Posit Connect's Microsoft integration -> device-code sign-in (MS_TENANT_ID + MS_CLIENT_ID).
+Scopes: Mail.Read.Shared (find), Mail.ReadWrite.Shared (draft). Unit-tested with a fake HTTP layer; not yet run against a tenant.
 """
 from __future__ import annotations
 
 import base64
 import os
-import re
 import time
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -31,13 +27,12 @@ class GraphError(RuntimeError):
     pass
 
 
-# ---------------------------------------------------------------- tokens
 def connect_token(session_token: str) -> tuple:
     """-> (token, error). The viewer's own Microsoft token from Posit Connect's OAuth integration."""
     if not session_token:
         return "", "not_on_connect"
     try:
-        from posit import connect as pc                      # official SDK when installed
+        from posit import connect as pc
         creds = pc.Client().oauth.get_credentials(session_token)
         tok = (creds or {}).get("access_token", "")
         return (tok, "") if tok else ("", "Posit Connect returned no access token.")
@@ -72,7 +67,6 @@ def device_start(tenant: str, client: str) -> tuple:
 
 
 def device_poll(tenant: str, client: str, dev: dict) -> tuple:
-    """-> (token dict | None, 'ok' | 'pending' | error text)."""
     try:
         r = requests.post(f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token", timeout=20,
                           data={"grant_type": "urn:ietf:params:oauth:grant-type:device_code", "client_id": client,
@@ -88,7 +82,6 @@ def device_poll(tenant: str, client: str, dev: dict) -> tuple:
     return None, (d.get("error_description") or d.get("error") or "sign-in failed").split("\r")[0][:220]
 
 
-# ---------------------------------------------------------------- calls
 def _h(token: str, **extra) -> dict:
     return {"Authorization": f"Bearer {token}", **extra}
 
@@ -106,7 +99,6 @@ def _err(r) -> str:
 
 
 def search_sent_items(token: str, mailbox: str, days_back: int = 365, max_items: int = 1000, http=requests) -> list:
-    """Sent Items of the shared mailbox, newest first -> [{id, subject, body, sent, to}] (body as plain text)."""
     since = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%SZ")
     url = (f"{GRAPH}/users/{mailbox}/mailFolders/sentitems/messages?$select=id,subject,body,sentDateTime,toRecipients"
            f"&$filter=sentDateTime ge {since}&$orderby=sentDateTime desc&$top=100")
@@ -125,31 +117,26 @@ def search_sent_items(token: str, mailbox: str, days_back: int = 365, max_items:
 
 
 def find_submission(token: str, mailbox: str, exposure_name: str, http=requests) -> dict | None:
-    msgs = search_sent_items(token, mailbox, http=http)
-    return mailmatch.find_best(exposure_name, msgs)
+    return mailmatch.find_best(exposure_name, search_sent_items(token, mailbox, http=http))
 
 
-def create_reply_draft(token: str, mailbox: str, message: dict, exposure_name: str, underwriter: str,
-                       attachments: list, http=requests) -> dict:
+def create_reply_draft(token: str, mailbox: str, message: dict, exposure_name: str, underwriter: str, attachments: list, http=requests) -> dict:
     """Create (do not send) a reply on the found message with the report attached. -> {id, webLink}."""
-    mid = message["id"]
-    r = http.post(f"{GRAPH}/users/{mailbox}/messages/{mid}/createReply", headers=_h(token), timeout=60)
+    r = http.post(f"{GRAPH}/users/{mailbox}/messages/{message['id']}/createReply", headers=_h(token), timeout=60)
     if r.status_code not in (200, 201):
         raise GraphError(_err(r))
     draft = r.json()
     did = draft["id"]
-    greeting = mailmatch.greeting_name(underwriter)
     quoted = (draft.get("body") or {}).get("content") or ""
-    html = (f"<p>Hi {greeting},</p><p>Please find the results for {exposure_name} attached.</p><p>Kind Regards,</p><br>{quoted}")
+    html = f"<p>Hi {mailmatch.greeting_name(underwriter)},</p><p>Please find the results for {exposure_name} attached.</p><p>Kind Regards,</p><br>{quoted}"
     patch = {"body": {"contentType": "HTML", "content": html}}
-    if message.get("to"):                                    # the macro addressed the reply to the original To recipients
+    if message.get("to"):
         patch["toRecipients"] = [{"emailAddress": {"address": a}} for a in message["to"] if a]
-    rp = http.patch(f"{GRAPH}/users/{mailbox}/messages/{did}", headers=_h(token, **{"Content-Type": "application/json"}),
-                    json=patch, timeout=60)
+    rp = http.patch(f"{GRAPH}/users/{mailbox}/messages/{did}", headers=_h(token, **{"Content-Type": "application/json"}), json=patch, timeout=60)
     if rp.status_code not in (200, 201):
         raise GraphError(_err(rp))
     for name, data, mime in attachments:
-        if len(data) > 2_900_000:                            # larger files need an upload session; say so instead of failing silently
+        if len(data) > 2_900_000:
             raise GraphError(f"{name} is {len(data) / 1e6:.1f} MB - attach it manually (the draft was created).")
         ra = http.post(f"{GRAPH}/users/{mailbox}/messages/{did}/attachments", headers=_h(token), timeout=120,
                        json={"@odata.type": "#microsoft.graph.fileAttachment", "name": name, "contentType": mime,
@@ -167,7 +154,7 @@ def build_eml(to: list, subject: str, body: str, attachments: list, sender: str 
         m["To"] = ", ".join(to)
     if sender:
         m["From"] = sender
-    m["X-Unsent"] = "1"                                       # Outlook opens it as an unsent draft
+    m["X-Unsent"] = "1"
     m.set_content(body)
     for name, data, mime in attachments:
         main, _, sub = (mime or "application/octet-stream").partition("/")
@@ -176,5 +163,4 @@ def build_eml(to: list, subject: str, body: str, attachments: list, sender: str 
 
 
 def reply_body(exposure_name: str, underwriter: str) -> str:
-    return (f"Hi {mailmatch.greeting_name(underwriter)},\n\nPlease find the results for {exposure_name} attached.\n\n"
-            f"Kind Regards,\n")
+    return f"Hi {mailmatch.greeting_name(underwriter)},\n\nPlease find the results for {exposure_name} attached.\n\nKind Regards,\n"
