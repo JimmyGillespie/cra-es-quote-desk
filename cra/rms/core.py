@@ -1,9 +1,4 @@
-"""Low-level RMS helpers: credentials, HTTP and tolerant JSON accessors.
-
-Ported from rms_results.py in the EQ-RMS app (streamlit_app_v18), which is confirmed working against the live API:
-the bare-key Authorization header, retry on 429/5xx, and the case-insensitive getters that the VBA JsonConverter code
-relied on.
-"""
+"""Low-level RMS helpers: credentials, HTTP and tolerant JSON accessors (ported from the EQ-RMS app)."""
 from __future__ import annotations
 
 import json
@@ -17,7 +12,6 @@ import requests
 from requests.adapters import HTTPAdapter
 
 
-# ---------------------------------------------------------------- keys / credentials
 def clean_key(k: str) -> str:
     """Tidy a pasted key: invisible characters, quotes, a leading 'Authorization:' / 'Bearer ', inner whitespace."""
     k = re.sub("[\u200b-\u200f\u2060\ufeff\u00a0]", "", k or "")
@@ -28,7 +22,6 @@ def clean_key(k: str) -> str:
 
 
 def key_fingerprint(k: str) -> str:
-    """Describe a key without revealing it."""
     k = clean_key(k)
     return f"{len(k)} characters, starts '{k[:3]}', ends '{k[-3:]}'" if len(k) >= 8 else f"{len(k)} characters"
 
@@ -42,7 +35,7 @@ class Creds:
     hazard_key: str = ""
     grouping_resource_group_id: str = ""
     verify: bool = True
-    grouping_auth: str = ""          # the Authorization value the Grouping API accepted (set on first success)
+    grouping_auth: str = ""
 
     def __post_init__(self):
         self.host = (self.host or "").strip()
@@ -60,7 +53,7 @@ class Resp(NamedTuple):
 
 
 class Http:
-    """Thin requests wrapper; one instance per run; safe for simple concurrent GET/POST."""
+    """Thin requests wrapper; retries 429/502/503/504 with backoff. Authorization is the bare key (no 'Bearer')."""
 
     def __init__(self, verify: bool = True):
         self.verify = verify
@@ -103,7 +96,6 @@ class Http:
         return self._do("POST", url, key, body=body, headers=headers)
 
 
-# ---------------------------------------------------------------- tolerant JSON accessors
 def _s(v) -> str:
     if v is None or isinstance(v, (dict, list)):
         return ""
@@ -163,7 +155,6 @@ def json_or_none(text: str):
 
 
 def as_list(parsed) -> list:
-    """Array, or {items|analyses|data|results|exposures|portfolios: [...]}."""
     if isinstance(parsed, list):
         return parsed
     if isinstance(parsed, dict):
