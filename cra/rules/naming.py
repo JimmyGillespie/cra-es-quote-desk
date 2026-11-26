@@ -6,8 +6,7 @@ from datetime import datetime
 
 
 def clean_file_name(s: str, maxlen: int = 120) -> str:
-    s = re.sub(r'[\\/:*?"<>|]', "", s or "").strip()
-    return s[:maxlen]
+    return re.sub(r'[\\/:*?"<>|]', "", s or "").strip()[:maxlen]
 
 
 def folder_name_from_exposure(exposure_name: str) -> str:
@@ -25,9 +24,7 @@ def folder_name_from_exposure(exposure_name: str) -> str:
 
 def report_file_name(exposure_name: str, stamp: str | None = None, ext: str = "xlsx") -> str:
     base = clean_file_name(exposure_name) or "Account"
-    if stamp:
-        return f"CRA_E&S_{base}_{stamp}.{ext}"
-    return f"CRA_E&S_{base}.{ext}"
+    return f"CRA_E&S_{base}_{stamp}.{ext}" if stamp else f"CRA_E&S_{base}.{ext}"
 
 
 def slug(s: str, maxlen: int = 60) -> str:
