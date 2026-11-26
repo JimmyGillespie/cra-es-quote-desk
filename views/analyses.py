@@ -5,10 +5,10 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from cra.constants import WORKFLOW_SUCCESS
-from cra.rules import ep as ep_rules
+from cra.constants import PERIL_NAMES
+from cra.rules import matching
 
-from .common import ctx, flags, need_account, need_rms, progress_cb, section, uk_dt
+from .common import all_analyses, ctx, flags, need_account, need_rms, progress_cb, section, uk_day, uk_dt
 
 TERMINAL_BAD = {"FAILED", "SUBMIT_FAILED", "CANCELED", "CANCELLED", "ERROR"}
 
@@ -21,7 +21,7 @@ def _jobs_table(p):
     rows = [{"Type": "Analysis" if j["kind"] == "analysis" else "Grouping", "Layer": j.get("layer", ""), "Peril": j.get("peril", ""),
              "Status": j["status"], "Progress": j.get("progress"), "Submitted": uk_dt(j.get("submitted")),
              "Checked": uk_dt(j.get("last_polled")), "Note": (j.get("error") or "")[:120]} for j in jobs]
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", height=min(60 + 35 * len(rows), 320),
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", height=min(40 + 35 * len(rows), 320),
                  column_config={"Progress": st.column_config.ProgressColumn("Progress", min_value=0, max_value=100, format="%d%%")})
     s = p.job_summary(jobs)
     st.caption(f"{s['done']} finished, {s['active']} in progress, {s['failed']} failed")
@@ -38,26 +38,25 @@ def render():
     if not p:
         return
     c = ctx()
-    sub = p.submission()
     ports = p.portfolios()
 
-    # ------------------------------------------------------------ run
-    section("1  Run analyses in RMS (optional)", "Skip this if the analyses already exist in RMS.")
+    section("1  Run analyses in RMS (optional)", "Skip this if the analyses already exist in RMS - use step 3 to find them.")
     prof = p.profiles()
-    st.warning("The model-profile IDs below are copied from the old RunRMSAnalysis macro and are **unverified**. Your current analyses use named "
-               "profiles (e.g. AS_EQ_PREBIND, AS_TO_PREBIND, output AS_Amtrust_output). Check each ID in RMS before submitting.",
-               icon=":material/rule:")
+    st.warning("The model-profile IDs below are copied from the old RunRMSAnalysis macro and are **unverified**. Current analyses use the named "
+               "profiles shown in the last column (read from your existing quotes). Check each ID in RMS before submitting.", icon=":material/rule:")
     with st.expander("Model settings", expanded=False):
         pf = pd.DataFrame(prof["perils"]).rename(columns={"code": "Code", "label": "Peril", "model_profile_id": "Model profile ID",
-                                                         "event_rate_scheme_id": "Event rate scheme ID"})
-        edited = st.data_editor(pf, hide_index=True, width="stretch", disabled=["Code", "Peril"], key=f"prof_edit_{p.id}")
+                                                         "event_rate_scheme_id": "Event rate scheme ID", "reference_profile": "Profile name used in existing analyses"})
+        edited = st.data_editor(pf, hide_index=True, width="stretch", disabled=["Code", "Peril", "Profile name used in existing analyses"], key=f"prof_edit_{p.id}")
         o1, o2, o3 = st.columns(3)
-        out_id = o1.number_input("Output profile ID", value=int(prof["output_profile_id"]), step=1)
+        out_id = o1.number_input("Output profile ID", value=int(prof["output_profile_id"]), step=1,
+                                 help=f"Existing analyses use the output profile {prof.get('reference_output_profile', '')}")
         vint = o2.text_input("Currency vintage", prof["currency"]["vintage"])
         asof = o3.text_input("Currency as-of date", prof["currency"]["asOfDate"])
         if st.button("Save settings for this quote"):
             prof["perils"] = [{"code": r["Code"], "label": r["Peril"], "model_profile_id": int(r["Model profile ID"]),
-                               "event_rate_scheme_id": int(r["Event rate scheme ID"])} for _, r in edited.iterrows()]
+                               "event_rate_scheme_id": int(r["Event rate scheme ID"]),
+                               "reference_profile": r["Profile name used in existing analyses"]} for _, r in edited.iterrows()]
             prof["output_profile_id"] = int(out_id)
             prof["currency"].update({"vintage": vint, "asOfDate": asof})
             st.success(f"Settings {p.put('profiles', prof).text()}")
@@ -99,54 +98,65 @@ def render():
                 st.caption(f"Checked {uk_dt(p.jobs()[-1].get('last_polled'))} - {s['active']} still running")
             _tick()
 
-    # ------------------------------------------------------------ analysis list
-    section("3  Analyses to use in the report", "Matched to this EDM by RMS exposure name first, then by the macro's name matching. Untick anything that does not belong.")
-    if need_rms() and st.button("Find analyses in RMS", type="primary" if not p.analyses() else "secondary"):
-        with st.spinner("Reading the analysis list from RMS..."):
-            try:
-                p.refresh_analyses()
-            except Exception as exc:                            # noqa: BLE001
-                st.error(f"Could not read analyses: {exc}")
+    section("3  Analyses to use in the report",
+            "Analyses are matched to this EDM by RMS exposure name or by the EDM at the start of the analysis name. Only the newest run per layer and peril is ticked.")
+    b = st.columns([1.5, 1.5, 5])
+    if need_rms() and b[0].button("Find analyses in RMS", type="primary" if not p.analyses() else "secondary"):
+        try:
+            p.refresh_analyses(all_analyses())
+        except Exception as exc:                                # noqa: BLE001
+            st.error(f"Could not read analyses: {exc}")
+        st.rerun()
+    if need_rms() and b[1].button("Re-read from RMS", help="The analysis list is cached for 10 minutes; this forces a fresh read."):
+        try:
+            p.refresh_analyses(all_analyses(refresh=True))
+        except Exception as exc:                                # noqa: BLE001
+            st.error(f"Could not read analyses: {exc}")
         st.rerun()
     items = p.analyses()
     if not items:
         st.caption("No analyses found yet.")
         return
-    df = pd.DataFrame([{"Use": a["selected"], "Layer": a["layer"], "Peril": a.get("peril") or a.get("perilCode"), "Analysis": a["analysisName"],
-                        "Analysis ID": a["analysisId"], "App ID": a["appAnalysisId"], "Portfolio ID": a["exposureResourceId"],
-                        "Created": a["createDate"][:10], "Match": a["match"]} for a in items])
-    sig = abs(hash(tuple(a["analysisId"] for a in items))) % 10**8       # new list -> new editor state (stale row edits must not carry over)
-    ed = st.data_editor(df, hide_index=True, width="stretch", key=f"an_edit_{p.id}_{sig}", height=min(80 + 35 * len(df), 460),
-                        disabled=[c for c in df.columns if c != "Use"],
-                        column_config={"Use": st.column_config.CheckboxColumn("Use", width="small")})
+    cov = matching.coverage(items)
+    if len(cov):
+        st.markdown("**Layer x peril coverage of the ticked analyses**")
+        st.dataframe(cov.fillna(""), hide_index=True, width="stretch", height=min(40 + 35 * len(cov), 240))
+    df = pd.DataFrame([{"Use": a["selected"], "Layer": a["layer"], "Peril": PERIL_NAMES.get(a["perilCode"], a.get("peril", "")),
+                        "Analysis": a["analysisName"], "Analysis ID": a["analysisId"], "Created": uk_day(a.get("createDate")),
+                        "Portfolio ID": a["exposureResourceId"], "Match": a["match"], "Superseded": "yes" if a.get("superseded") else ""} for a in items])
+    sig = abs(hash(tuple(a["analysisId"] for a in items))) % 10 ** 8      # a new list -> a new editor state
+    ed = st.data_editor(df, hide_index=True, width="stretch", key=f"an_edit_{p.id}_{sig}", height=min(60 + 35 * len(df), 460),
+                        disabled=[x for x in df.columns if x != "Use"], column_config={"Use": st.column_config.CheckboxColumn("Use", width="small")})
     chosen = set(ed.loc[ed["Use"], "Analysis ID"])
     if chosen != {a["analysisId"] for a in items if a["selected"]}:
         p.set_selection(chosen)
-    fuzzy = [a for a in items if a["match"] != "exact EDM" and a["analysisId"] in chosen]
+    fuzzy = [a for a in items if a["match"] not in matching.CONFIDENT and a["analysisId"] in chosen]
     if fuzzy:
         flags([("warn", f"{len(fuzzy)} selected analysis(es) were matched by name only, not by EDM. Check they belong to this account.")])
     dup = {}
     for a in items:
         if a["analysisId"] in chosen:
-            dup.setdefault((a["layer"], a.get("perilCode") or a.get("peril")), []).append(a["analysisId"])
+            dup.setdefault((a["layer"], a["perilCode"]), []).append(a["analysisId"])
     for (l, pr), ids in dup.items():
         if len(ids) > 1:
-            flags([("warn", f"Layer {l}, {pr}: {len(ids)} analyses selected - only the first is used in the report.")])
+            flags([("warn", f"Layer {l}, {PERIL_NAMES.get(pr, pr)}: {len(ids)} analyses selected - only the first is used in the report.")])
     st.caption(f"{len(chosen)} of {len(items)} selected")
 
-    # ------------------------------------------------------------ grouping
-    section("4  Group perils into an All-Perils analysis", "One grouping job per portfolio (analyses with a portfolio ID above 0), as the macro did.")
+    section("4  Group perils into an All-Perils analysis", "One grouping job per portfolio (analyses with a portfolio ID above 0), as the macro did. Existing All Perils results are not re-grouped.")
     sel_items = [a for a in items if a["analysisId"] in chosen]
     groups = {}
     for a in sel_items:
+        if matching.is_grouped(a):
+            continue
         try:
             if float(a["exposureResourceId"]) > 0:
                 groups.setdefault(str(int(float(a["exposureResourceId"]))), []).append(a)
         except ValueError:
             pass
     if groups:
-        st.dataframe(pd.DataFrame([{"Portfolio ID": k, "Layer": v[0]["layer"], "Analyses": len(v), "Perils": ", ".join(sorted({x.get('perilCode') or x['peril'] for x in v}))}
-                                   for k, v in groups.items()]), hide_index=True, width="stretch")
+        st.dataframe(pd.DataFrame([{"Portfolio ID": k, "Layer": v[0]["layer"], "Analyses": len(v),
+                                    "Perils": ", ".join(sorted({PERIL_NAMES.get(x["perilCode"], x["peril"]) for x in v}))} for k, v in groups.items()]),
+                     hide_index=True, width="stretch")
         has_key = bool(c.settings.grouping_key) or c.demo
         if not has_key:
             st.error("GROUPING_API_KEY is not set.", icon=":material/key_off:")
@@ -165,4 +175,4 @@ def render():
                     st.error(f"Portfolio {r['portfolio_id']}: not submitted")
                     st.code(r.get("error", "")[:1500])
     else:
-        st.caption("Nothing to group - the selected analyses have no portfolio ID.")
+        st.caption("Nothing to group - the selected analyses have no portfolio ID, or are already All Perils results.")
