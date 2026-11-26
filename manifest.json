@@ -78,6 +78,9 @@
       "checksum": "dd8734f496c93189df6e7c540508e6fd"
     },
     "cra/rms/layer_api.py": {
+      "checksum": "917d6c1b0ef76e628aa430364088540b"
+    },
+    "cra/rms/layer_api.py.bak": {
       "checksum": "8f46cb5265fcb7cc8998c65114ee81aa"
     },
     "cra/rms/service.py": {
