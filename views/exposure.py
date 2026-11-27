@@ -1,9 +1,10 @@
 """Exposure: the location schedule as a dashboard.
 
-    Overview | Map and geography | Buildings | Concentration | Data quality | Locations
+    Overview | Map and geography | Buildings | Data quality | Locations
 
-Replaces the RMS 'Exposure Summary' report with the same facts (cover values, geocoding, construction, occupancy, area, windstorm
-coast detail) plus what a reviewer actually asks: where it is, how concentrated it is, how old and tall, and how good the data is.
+The Overview is a data-completeness page: how much of the value has a street-level geocode, a known construction, occupancy,
+year built and number of stories, and how the schedule breaks down by each (the same idea as a Power BI 'Data quality and
+completeness' page, with the figures written on the charts and a traffic-light on every completeness tile).
 All the analysis is in cra/expo.py; the charts are in cra/viz.py. This file only lays them out.
 
 The Microsoft sign-in and e-mail search helpers (_token, _device_signin, _email_finder) also live here because the Account and
@@ -23,9 +24,10 @@ from cra import expo, graph, viz
 
 from .common import ctx, flags, goto, kpis, need_account, need_rms, progress_cb, section, show_chart, uk_dt
 
-VIEWS = ["Overview", "Map and geography", "Buildings", "Concentration", "Data quality", "Locations"]
+VIEWS = ["Overview", "Map and geography", "Buildings", "Data quality", "Locations"]
 MONEY = "${:,.0f}"
 PCT = "{:.1%}"
+LEVEL_COLOURS = {"green": "#2E8B57", "amber": "#E0A100", "red": "#C0392B"}
 
 
 # =============================================================== Microsoft sign-in and e-mail search (used by other pages)
@@ -137,6 +139,16 @@ def _chart(ch) -> None:
     show_chart(ch)
 
 
+def _tile(label: str, value: str, sub: str | None = None, level: str | None = None) -> None:
+    """A figure tile. With a level, the left edge is green / amber / red (completeness tiles)."""
+    edge = LEVEL_COLOURS.get(level, "#0F4C81")
+    st.markdown(
+        f"<div style='background:#F3F5F9;border:1px solid #E2E6EF;border-left:6px solid {edge};border-radius:6px;padding:12px 14px;height:100%'>"
+        f"<div style='font-size:.66rem;letter-spacing:.09em;text-transform:uppercase;color:#5B6478;font-weight:600'>{label}</div>"
+        f"<div style='font-size:1.8rem;font-weight:650;color:#0B2545;line-height:1.2'>{value}</div>"
+        f"<div style='font-size:.74rem;color:#6B7488'>{sub or '&nbsp;'}</div></div>", unsafe_allow_html=True)
+
+
 # =============================================================== loading and account choice
 def _load_bar(p, c, d) -> None:
     b = st.columns([1.6, 3.4, 1.4, 4])
@@ -178,47 +190,66 @@ def _accounts(p, full) -> None:
         _table(acc, {"TIV": MONEY}, height=min(40 + 35 * len(acc), 220))
 
 
-# =============================================================== the six views
+# =============================================================== the five views
+COMPLETENESS = [("geo", "Street-level geocoding"), ("cons", "Construction known"), ("occ", "Occupancy known"),
+                ("year", "Year built known"), ("stories", "Stories known")]
+
+
+def _short(labels: list, n: int = 28) -> list:
+    """Long category names shortened for a narrow chart (kept whole if shortening would make two of them the same)."""
+    cut = [x if len(x) <= n else x[:n - 1].rstrip() + "…" for x in labels]
+    return cut if len(set(cut)) == len(cut) else list(labels)
+
+
+def _top5(df, col: str, title: str, color: str):
+    g = expo.group_tiv(df, col, top=5, other="All other")
+    g["label"] = _short(g["label"].tolist())
+    return viz.hbar(g, "label", "TIV", title, note="Locations", order=g["label"].tolist(), color=color)
+
+
 def _overview(df, h) -> None:
     rep = h["reported"]
-    kpis([("TIV modelled", viz.fmt_money(h["tiv"]), (f"{h['delta'] * 100:+.1f}% vs reported {viz.fmt_money(rep)}" if rep and h["delta"] is not None else "no reported TIV set")),
-          ("Locations", f"{h['locations']:,}", f"{h['states']} state(s)" if h["states"] else None),
-          ("Accounts", f"{h['accounts']:,}", None),
-          ("Average per location", viz.fmt_money(h["avg_tiv"]), None),
-          ("Largest location", viz.fmt_money(h["largest_tiv"]), (f"{h['largest_share'] * 100:.1f}% of TIV" if h["largest_share"] is not None else None)),
-          ("Ten largest", f"{h['top10_share'] * 100:.0f}% of TIV" if h["top10_share"] is not None else "-", None)])
+    a = st.columns(4)
+    with a[0]:
+        _tile("TIV modelled", viz.fmt_money(h["tiv"]), (f"{h['delta'] * 100:+.1f}% vs reported {viz.fmt_money(rep)}" if rep and h["delta"] is not None else "no reported TIV set"))
+    with a[1]:
+        _tile("Locations", f"{h['locations']:,}", f"{h['states']} state(s)" if h["states"] else None)
+    with a[2]:
+        _tile("Accounts", f"{h['accounts']:,}")
+    with a[3]:
+        _tile("Average per location", viz.fmt_money(h["avg_tiv"]))
+
+    section("How complete is the data?", "The share of the total value (TIV) that has each attribute. Green is 95% or more, amber 80% or more, red below that. "
+                                         "The Data quality view lists the locations behind each one.")
+    q = {r["key"]: r for r in expo.quality_scores(df)}
+    for col, (key, label) in zip(st.columns(5), COMPLETENESS):
+        r = q[key]
+        with col:
+            _tile(label, f"{r['pct_tiv'] * 100:.0f}%", (f"{r['bad']:,} location(s) · {viz.fmt_money(r['bad_tiv'])} to check" if r["bad"] else "every location"), r["level"])
     st.write("")
-    cs = expo.cover_split(df)
-    parts = cs[~cs["Cover"].isin(["Total"])].rename(columns={"Cover": "label", "Value": "TIV"})
-    a, b = st.columns([4, 6])
-    with a:
-        _chart(viz.donut(parts, "label", "TIV", "Value by cover", center=viz.fmt_money(h["tiv"]), fixed={"Building": "#0B2545", "Contents": "#2F6DB5", "Business interruption": "#C8434B"}))
-    with b:
-        _panel("Cover values", "How many locations carry each cover, and the size of the values (the RMS 'valid location coverage values' table).")
-        _table(cs, {"Value": MONEY, "Share": PCT, "Min": MONEY, "Max": MONEY, "Average": MONEY, "Locations": "{:,.0f}"})
-    a, b = st.columns(2)
-    with a:
-        _chart(viz.donut(expo.group_tiv(df, "Occupancy Name", top=6), "label", "TIV", "Occupancy"))
-    with b:
-        _chart(viz.donut(expo.group_tiv(df, "Construction Name", top=6), "label", "TIV", "Construction"))
-    a, b = st.columns(2)
-    with a:
-        yb = expo.group_tiv(df, "Year Built Band", expo.YEAR_ORDER)
-        _chart(viz.column(yb, "label", "TIV", expo.YEAR_ORDER, "Year built"))
-    with b:
-        sb = expo.group_tiv(df, "Stories Band", expo.STORIES_ORDER)
-        _chart(viz.column(sb, "label", "TIV", expo.STORIES_ORDER, "Number of stories", color="#2A9D8F"))
-    a, b = st.columns(2)
-    with a:
-        sc = expo.state_county(df)
-        by_state = sc.groupby("State", as_index=False).agg(Locations=("Locations", "sum"), TIV=("TIV", "sum")).sort_values("TIV", ascending=False).head(8)
-        by_state["Share"] = by_state["TIV"] / (sc["TIV"].sum() or 1.0)
-        _chart(viz.hbar(by_state.rename(columns={"State": "label"}), "label", "TIV", "Where the value sits (by state)", note="Locations"))
-    with b:
-        _chart(viz.donut(expo.group_tiv(df, "Geocoding Resolution", top=6), "label", "TIV", "How precisely locations are placed"))
-    st.markdown("**Ten largest locations**")
-    t = expo.top_locations(df, 10)
-    _table(t, {"TIV": MONEY, "Share": PCT})
+
+    c = st.columns(3)
+    with c[0]:
+        g = expo.group_tiv(df, "Geocoding Resolution")
+        _chart(viz.hbar(g, "label", "TIV", "Geocoding resolution (share of TIV)", note="Locations", order=g["label"].tolist(), color="#0F4C81"))
+    with c[1]:
+        _chart(_top5(df, "Construction Name", "Top 5 construction (share of TIV)", "#2F6DB5"))
+    with c[2]:
+        _chart(_top5(df, "Occupancy Name", "Top 5 occupancy (share of TIV)", "#2A9D8F"))
+    d = st.columns(3)
+    with d[0]:
+        _chart(viz.donut(expo.group_tiv(df, "Year Built Band", expo.YEAR_ORDER), "label", "TIV", "Year built"))
+    with d[1]:
+        _chart(viz.donut(expo.group_tiv(df, "Stories Band", expo.STORIES_ORDER), "label", "TIV", "Number of stories"))
+    with d[2]:
+        fa = expo.floor_area_groups(df)
+        if fa is not None:
+            _chart(viz.donut(fa, "label", "TIV", "Floor area"))
+        else:
+            sc = expo.state_county(df)
+            by_state = sc.groupby("State", as_index=False).agg(Locations=("Locations", "sum"), TIV=("TIV", "sum")).sort_values("TIV", ascending=False).head(6)
+            by_state["Share"] = by_state["TIV"] / (sc["TIV"].sum() or 1.0)
+            _chart(viz.donut(by_state.rename(columns={"State": "label"}), "label", "TIV", "Value by state"))
 
 
 def _deck(points: pd.DataFrame, height: int = 540) -> None:
@@ -267,7 +298,7 @@ def _geography(df, h) -> None:
         else:
             top = acc.assign(label=acc["Area"])
             _chart(viz.hbar(top, "label", "TIV", "Biggest piles of value in one small area", note="Locations"))
-    section("Windstorm and the coast", "Wind tier by how precisely the locations are placed (the RMS coastal-counties view), and the hazard layers if they were added.")
+    section("Windstorm and the coast", "Wind tier by how precisely the locations are placed, and the hazard layers if they were added.")
     a, b = st.columns(2)
     with a:
         wt = expo.group_tiv(df, "Wind Tier", expo.WIND_ORDER)
@@ -307,43 +338,6 @@ def _buildings(df) -> None:
         g = expo.group_tiv(df, "Occupancy Name")
         _panel("Occupancy table")
         _table(g.rename(columns={"label": "Occupancy"}), {"TIV": MONEY, "Share": PCT, "Average": MONEY})
-
-
-def _concentration(df, h) -> None:
-    c = expo.concentration(df)
-    if not c["n"]:
-        st.info("There is no value to measure concentration on.")
-        return
-    t = c["top"]
-    kpis([("Largest location", f"{t.get(1, 0) * 100:.1f}%", "of total value"), ("Five largest", f"{t.get(5, 0) * 100:.0f}%", "of total value"),
-          ("Ten largest", f"{t.get(10, 0) * 100:.0f}%", "of total value"),
-          ("Equivalent to", f"{c['effective']:.1f} equal locations", f"out of {c['n']:,} (a measure of spread)"), ("Inequality (Gini)", f"{c['gini']:.2f}", "0 = even, 1 = one location")])
-    st.write("")
-    a, b = st.columns([6, 4])
-    with a:
-        marks = [{"x": k / c["n"], "y": v, "label": f"Top {k}"} for k, v in t.items() if k in (1, 5, 10) and k < c["n"]]
-        _chart(viz.pareto(c["curve"], marks, "How much of the value sits in how few locations"))
-        st.caption("The further the line bows above the dotted line, the more the value is held by a few locations.")
-    with b:
-        _panel("Ten largest locations")
-        _table(expo.top_locations(df, 10)[["Address", "TIV", "Share"]], {"TIV": MONEY, "Share": PCT}, height=420)
-    cell = st.radio("Pile-up size", [0.01, 0.05, 0.1], index=1, format_func={0.01: "About 1 km", 0.05: "About 5 km", 0.1: "About 10 km"}.get, horizontal=True, key="expo_cell2")
-    acc = expo.accumulations(df, cell, 12)
-    a, b = st.columns(2)
-    with a:
-        _panel("Biggest piles of value in one small area", "One bad event can hit all of it. Locations are grouped on a grid of the chosen size.")
-        if acc.empty:
-            st.caption("No coordinates to build accumulations from.")
-        else:
-            _table(acc[["Area", "Locations", "TIV", "Share"]], {"TIV": MONEY, "Share": PCT})
-    with b:
-        s = expo.sites(df)
-        _panel("Places with several locations at the same point", "A campus or multi-building site: one coordinate, several buildings.")
-        if s.empty:
-            st.caption("No two locations share a coordinate.")
-        else:
-            st.caption(f"{len(s)} site(s) hold {s['Locations'].sum():,} locations and {viz.fmt_money(s['TIV'].sum())} ({s['TIV'].sum() / (h['tiv'] or 1) * 100:.0f}% of TIV).")
-            _table(s.head(12), {"TIV": MONEY, "Share": PCT})
 
 
 def _quality(df) -> None:
@@ -419,7 +413,7 @@ def render() -> None:
     full = p.all_locations()
     if full is None:
         st.info("The locations have not been loaded yet. Press **Load locations from RMS** - it takes a few minutes for a large account - and this page fills with the "
-                "map, concentration and data-quality views.", icon=":material/downloading:")
+                "completeness overview, map and data-quality views.", icon=":material/downloading:")
         return
     _accounts(p, full)
     df, rec = p.locations(), p.exposure_check()
@@ -432,7 +426,7 @@ def render() -> None:
             flags(notes)
     h = expo.headline(df, (rec or {}).get("tiv_reported"))
     top = st.columns([6.5, 3.5])
-    if st.session_state.get("expo_view") not in VIEWS:
+    if st.session_state.get("expo_view") not in VIEWS:                  # also covers a view that no longer exists (e.g. the old 'Concentration')
         st.session_state["expo_view"] = VIEWS[0]
     view = top[0].segmented_control("View", VIEWS, key="expo_view", label_visibility="collapsed") or VIEWS[0]
     with top[1]:
@@ -442,8 +436,6 @@ def render() -> None:
         _geography(df, h)
     elif view == "Buildings":
         _buildings(df)
-    elif view == "Concentration":
-        _concentration(df, h)
     elif view == "Data quality":
         _quality(df)
     elif view == "Locations":
