@@ -2,13 +2,16 @@
 
 Takes the location table the app builds (one row per location: Location TIV, Buildings / Contents / BI TIV, construction,
 occupancy, year built band, stories band, geocoding resolution, wind tier, account, address, latitude / longitude and the
-optional hazard columns). Every function tolerates missing columns, zeros and blanks, so a thin or messy schedule never breaks
-the page. It replaces the RMS 'Exposure Summary' report: the same facts (coverage values, geocoding, construction,
-occupancy, area, windstorm coast detail) plus the things a reviewer actually asks - concentration, accumulation and data quality.
+optional hazard and floor-area columns). Every function tolerates missing columns, zeros and blanks, so a thin or messy schedule
+never breaks the page.
+
+The Overview is a data-completeness dashboard: how much of the value (TIV) has a known construction, occupancy, year built, number
+of stories and a street-level geocode, and how the schedule breaks down by each.
 """
 from __future__ import annotations
 
 import math
+import re
 
 import numpy as np
 import pandas as pd
@@ -19,7 +22,7 @@ STORIES_ORDER = ["1", "2", "3", "4", "5", "6", "7-10", "11-20", "21-50", "50+", 
 WIND_ORDER = ["T1", "T2", "Rest of State", "N/A"]
 DTC_ORDER = ["Under 1 mile", "1 to 5 miles", "5 to 10 miles", "Over 10 miles", "N/A"]
 FLOOD_ORDER = ["High risk (A / V zones)", "Moderate (shaded X)", "Minimal (X)", "Undetermined (D)", "Not enriched", "Error"]
-FINE_GEOCODE = ("parcel", "street", "building", "address", "rooftop", "point")
+FLOOR_ORDER = ["< 1,500", "1,500-2,500", "2,500-5,000", "5,000-10,000", "> 10,000", UNKNOWN]
 _BLANKS = {"", "0", "0.0", "nan", "none", "n/a", "unknown", "null"}
 
 
@@ -65,7 +68,7 @@ def coords(df: pd.DataFrame) -> pd.DataFrame:
     return df.assign(lat=lat, lon=lon)[ok]
 
 
-# ---------------------------------------------------------------- headline and cover
+# ---------------------------------------------------------------- headline
 def headline(df: pd.DataFrame, reported=None) -> dict:
     tiv, n = float(num(df, "Location TIV").sum()), len(df)
     vals = num(df, "Location TIV")
@@ -79,23 +82,6 @@ def headline(df: pd.DataFrame, reported=None) -> dict:
             "largest_name": (f"{big.get('Street Address', '')}, {big.get('City', '')}".strip(", ") if big is not None else ""),
             "top10_share": top10, "reported": reported,
             "delta": (tiv / reported - 1) if reported else None}
-
-
-def cover_split(df: pd.DataFrame) -> pd.DataFrame:
-    """The RMS 'Valid location coverage values' table: by cover, how many locations carry it and the value, share, min, max, average."""
-    tiv = float(num(df, "Location TIV").sum())
-    rows, split = [], 0.0
-    for label, col in (("Building", "Buildings TIV"), ("Contents", "Contents TIV"), ("Business interruption", "BI TIV")):
-        v = num(df, col)
-        has = v > 0
-        rows.append({"Cover": label, "Locations": int(has.sum()), "Value": float(v.sum()), "Share": (float(v.sum()) / tiv) if tiv else 0.0,
-                     "Min": float(v[has].min()) if has.any() else None, "Max": float(v[has].max()) if has.any() else None,
-                     "Average": float(v[has].mean()) if has.any() else None})
-        split += float(v.sum())
-    if tiv - split > 1.0:
-        rows.append({"Cover": "Not split by cover", "Locations": None, "Value": tiv - split, "Share": (tiv - split) / tiv, "Min": None, "Max": None, "Average": None})
-    rows.append({"Cover": "Total", "Locations": len(df), "Value": tiv, "Share": 1.0 if tiv else 0.0, "Min": None, "Max": None, "Average": None})
-    return pd.DataFrame(rows)
 
 
 def group_tiv(df: pd.DataFrame, col: str, order: list | None = None, top: int | None = None, other: str = "Other") -> pd.DataFrame:
@@ -133,25 +119,6 @@ def top_locations(df: pd.DataFrame, n: int = 10) -> pd.DataFrame:
                          "TIV": d["_t"].values, "Share": (d["_t"] / tiv).values})
 
 
-# ---------------------------------------------------------------- concentration
-def concentration(df: pd.DataFrame, points: int = 300) -> dict:
-    """How much of the value sits in how few locations: the cumulative curve, the top-N shares, and an 'effective number of locations'."""
-    v = np.sort(num(df, "Location TIV").to_numpy())[::-1]
-    v = v[v > 0]
-    n, tot = len(v), float(v.sum())
-    if n == 0 or tot <= 0:
-        return {"curve": pd.DataFrame(columns=["Share of locations", "Share of TIV"]), "top": {}, "effective": None, "gini": None, "n": n}
-    cum = np.cumsum(v) / tot
-    idx = np.unique(np.linspace(0, n - 1, min(points, n)).astype(int))
-    curve = pd.DataFrame({"Share of locations": (idx + 1) / n, "Share of TIV": cum[idx]})
-    curve = pd.concat([pd.DataFrame({"Share of locations": [0.0], "Share of TIV": [0.0]}), curve], ignore_index=True)
-    shares = v / tot
-    asc = v[::-1]
-    gini = float((2 * np.arange(1, n + 1) - n - 1).dot(asc) / (n * asc.sum())) if n > 1 else 0.0
-    return {"curve": curve, "top": {k: float(cum[min(k, n) - 1]) for k in (1, 5, 10, 20) if n >= 1}, "effective": float(1.0 / (shares ** 2).sum()),
-            "gini": gini, "n": n}
-
-
 def accumulations(df: pd.DataFrame, cell: float = 0.05, top: int = 10) -> pd.DataFrame:
     """The biggest piles of value in one small area (a grid of `cell` degrees; 0.05 is about 5 km). One bad event can hit all of it."""
     d = coords(df)
@@ -172,22 +139,34 @@ def accumulations(df: pd.DataFrame, cell: float = 0.05, top: int = 10) -> pd.Dat
     return out
 
 
-def sites(df: pd.DataFrame) -> pd.DataFrame:
-    """Places where several locations share exactly the same coordinates (a campus, a multi-building site)."""
-    d = coords(df)
-    if d.empty:
-        return pd.DataFrame(columns=["Site", "Locations", "TIV", "Share"])
-    d = d.assign(_k=d["lat"].round(6).astype(str) + "," + d["lon"].round(6).astype(str), _t=num(d, "Location TIV"))
-    cnt = d.groupby("_k")["_t"].transform("size")
-    d = d[cnt > 1]
-    if d.empty:
-        return pd.DataFrame(columns=["Site", "Locations", "TIV", "Share"])
-    total = float(num(df, "Location TIV").sum()) or 1.0
-    d = d.assign(_addr=(text(d, "Street Address", "") + ", " + text(d, "City", "")).str.strip(", "))
-    g = d.groupby("_k").agg(Locations=("_t", "size"), TIV=("_t", "sum"), _addr=("_addr", "first")).reset_index()
-    g["Site"] = g["_addr"].where(g["_addr"] != "", g["_k"])
-    g["Share"] = g["TIV"] / total
-    return g[["Site", "Locations", "TIV", "Share"]].sort_values("TIV", ascending=False).reset_index(drop=True)
+# ---------------------------------------------------------------- floor area (only when the schedule carries it)
+def floor_area_col(df: pd.DataFrame):
+    """The floor-area column, whatever it is called ('Floor Area', 'FLOORAREA', 'floorArea'), or None when the schedule has none."""
+    for c in df.columns:
+        if re.sub(r"[^a-z]", "", str(c).lower()) == "floorarea":
+            return c
+    return None
+
+
+def floor_area_band(v) -> str:
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return UNKNOWN
+    if n != n or n <= 0:
+        return UNKNOWN
+    return "< 1,500" if n < 1500 else "1,500-2,500" if n < 2500 else "2,500-5,000" if n < 5000 else "5,000-10,000" if n < 10000 else "> 10,000"
+
+
+def floor_area_groups(df: pd.DataFrame):
+    """TIV by floor-area band, or None when the schedule has no floor-area column (or none of it is filled in)."""
+    col = floor_area_col(df)
+    if col is None:
+        return None
+    d = df.assign(_fa=df[col].map(floor_area_band))
+    if (d["_fa"] == UNKNOWN).all():
+        return None
+    return group_tiv(d, "_fa", FLOOR_ORDER)
 
 
 # ---------------------------------------------------------------- matrices
@@ -252,11 +231,19 @@ def hazard_groups(df: pd.DataFrame) -> dict:
 
 
 # ---------------------------------------------------------------- data quality
+# 'Street name / census tract', zip, city and so on are coarser than a street address: they are NOT high resolution.
+_COARSE = ("census", "street name", "zip", "postal", "city", "county", "admin", "country", "un_geocoded", "ungeocoded", "not geocoded", "unknown")
+_FINE = ("parcel", "street", "building", "address", "rooftop", "point", "coordinate")
+
+
 def _fine(v) -> bool:
-    return any(w in str(v).lower() for w in FINE_GEOCODE)
+    s = str(v).strip().lower()
+    if not s or s in _BLANKS or any(w in s for w in _COARSE):
+        return False
+    return any(w in s for w in _FINE)
 
 
-CHECKS = [("coords", "Has latitude and longitude"), ("geo", "Geocoded to street, building or parcel"), ("year", "Year built is known"),
+CHECKS = [("coords", "Has latitude and longitude"), ("geo", "Geocoded to street level or better"), ("year", "Year built is known"),
           ("stories", "Number of stories is known"), ("cons", "Construction is known"), ("occ", "Occupancy is known"),
           ("bldg", "Building value is above zero"), ("hazard", "Hazards have been added")]
 
@@ -311,7 +298,7 @@ def issue_rows(df: pd.DataFrame, key: str) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- windstorm / coast
 def wind_by_resolution(df: pd.DataFrame) -> pd.DataFrame:
-    """Wind tier by geocoding resolution - the RMS 'coastal counties by geocoding resolution' view: [Wind tier, Geocoding, Locations, TIV]."""
+    """Wind tier by geocoding resolution: [Wind tier, Geocoding, Locations, TIV]."""
     d = pd.DataFrame({"Wind tier": text(df, "Wind Tier", "N/A"), "Geocoding": text(df, "Geocoding Resolution"), "tiv": num(df, "Location TIV")})
     g = d.groupby(["Wind tier", "Geocoding"]).agg(Locations=("tiv", "size"), TIV=("tiv", "sum")).reset_index()
     rank = {v: i for i, v in enumerate(WIND_ORDER)}
@@ -368,14 +355,17 @@ def summary_workbook(df: pd.DataFrame, reported=None) -> bytes:
     import io
     h = headline(df, reported)
     sheets = {
-        "Headline": pd.DataFrame({"Measure": ["TIV modelled", "TIV reported", "Locations", "Accounts", "Average TIV per location", "Largest location", "Largest location share", "Top 10 share"],
-                                  "Value": [h["tiv"], h["reported"], h["locations"], h["accounts"], h["avg_tiv"], h["largest_tiv"], h["largest_share"], h["top10_share"]]}),
-        "Cover": cover_split(df), "State and county": state_county(df), "Construction": group_tiv(df, "Construction Name"),
-        "Occupancy": group_tiv(df, "Occupancy Name"), "Year built": group_tiv(df, "Year Built Band", YEAR_ORDER), "Stories": group_tiv(df, "Stories Band", STORIES_ORDER),
-        "Geocoding": group_tiv(df, "Geocoding Resolution"), "Wind tier": wind_by_resolution(df), "Top locations": top_locations(df, 25),
-        "Accumulations 5km": accumulations(df, 0.05, 25).drop(columns=["lat", "lon"], errors="ignore"), "Shared sites": sites(df),
+        "Headline": pd.DataFrame({"Measure": ["TIV modelled", "TIV reported", "Locations", "Accounts", "Average TIV per location"],
+                                  "Value": [h["tiv"], h["reported"], h["locations"], h["accounts"], h["avg_tiv"]]}),
         "Data quality": pd.DataFrame(quality_scores(df)).drop(columns=["key"], errors="ignore"),
+        "Geocoding": group_tiv(df, "Geocoding Resolution"), "Construction": group_tiv(df, "Construction Name"),
+        "Occupancy": group_tiv(df, "Occupancy Name"), "Year built": group_tiv(df, "Year Built Band", YEAR_ORDER), "Stories": group_tiv(df, "Stories Band", STORIES_ORDER),
+        "State and county": state_county(df), "Wind tier": wind_by_resolution(df), "Top locations": top_locations(df, 25),
+        "Accumulations 5km": accumulations(df, 0.05, 25).drop(columns=["lat", "lon"], errors="ignore"),
     }
+    fa = floor_area_groups(df)
+    if fa is not None:
+        sheets["Floor area"] = fa
     for name, t in hazard_groups(df).items():
         sheets[name[:31]] = t
     buf = io.BytesIO()
