@@ -3,7 +3,7 @@
     Home: pick an EDM  ->  the EDM's workspace:  Account | Exposure | Add layers | Analyses | Results | Report
 
 The EDM is the account. Opening one opens its saved account (or creates it). The address bar keeps ?edm=...&page=... so a
-refresh or a bookmark returns to the same place.
+refresh or a bookmark returns to the same place.  The Analyses page opens with 'Run all covered perils'.
 
 Start:  streamlit run app.py          (CRA_DEMO=1 for an offline demo with synthetic data)
 Keys (Posit Connect 'Vars' tab / environment): RISKDATA_API_KEY, LI_API_KEY, GROUPING_API_KEY, optional
@@ -11,6 +11,7 @@ GROUPING_RESOURCE_GROUP_ID, RMS_HOST, CRA_SHARE_DIR, CRA_STORE_DIR, CRA_MAILBOX,
 """
 from __future__ import annotations
 
+import inspect
 import os
 
 import streamlit as st
@@ -22,10 +23,22 @@ from cra.config import Settings, default_store_roots, env_getter           # noq
 from cra.rms.demo import DemoService                                       # noqa: E402
 from cra.rms.service import RmsService                                     # noqa: E402
 from cra.store import AccountStore                                         # noqa: E402
-from views import analyses, common, exposure, hazards, home, layering, overview, report, results   # noqa: E402
+from views import analyses, autorun, common, exposure, hazards, home, layering, overview, report, results   # noqa: E402
 
-PAGES = {"account": overview.render, "layers": layering.render, "analyses": analyses.render, "results": results.render,
-         "report": report.render}
+
+def _analyses_page() -> None:
+    """The Analyses page, opened by 'Run all covered perils' (unless the page itself already shows it)."""
+    p = common.pipeline()
+    try:
+        has_own = "render_autorun" in inspect.getsource(analyses)
+    except (OSError, TypeError):
+        has_own = False
+    if p is not None and not has_own:
+        autorun.render_autorun(p)
+    analyses.render()
+
+
+PAGES = {"account": overview.render, "layers": layering.render, "analyses": _analyses_page, "results": results.render, "report": report.render}
 
 
 def _secrets() -> dict:
@@ -130,13 +143,17 @@ def _pick_section(p) -> str:
             st.session_state["exp_tab"] = tab
     if st.session_state.get("section") not in keys:
         st.session_state["section"] = "account"
-    back, nav = st.columns([1.2, 9])
+    back, nav, note = st.columns([1.2, 6.2, 2.8])
     if back.button("← All EDMs", key="back_home", help="Back to the list of EDMs"):
         common.go_home()
         st.rerun()
     with nav:
-        picked = st.segmented_control("Menu", keys, key="section", label_visibility="collapsed",
-                                      format_func=lambda k: f"{'✓  ' if status.get(k) else ''}{labels[k]}")
+        # The labels must never change between runs: Streamlit treats a widget whose options changed as a new widget and forgets its state
+        # (which bounced the menu back to Account whenever a tick appeared in it). Progress is shown beside the menu instead.
+        picked = st.segmented_control("Menu", keys, key="section", label_visibility="collapsed", format_func=labels.get)
+    done = [labels[k] for k in keys if status.get(k)]
+    if done:
+        note.caption("Done so far: " + ", ".join(done))
     return picked or "account"
 
 
