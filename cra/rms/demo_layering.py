@@ -1,5 +1,8 @@
 """In-memory stand-in for the RMS calls used by Dynamic Layering (CRA_DEMO=1 and the tests). Same methods as LayerApi.
 
+Policies are written "for one peril", so every demo account has one policy per peril (default Earthquake and Windstorm) and each
+policy carries a `peril` object - which is how the app works out the perils a quote covers.
+
 Test switches:  copy_ignores_names  the account copy keeps its own name / number ("<name> (copy)", "<number>_C")
                 reject_copy         the copy request is refused with HTTP 400
                 slow_polls          polls that still say RUNNING before the job finishes
@@ -14,6 +17,8 @@ import copy
 import itertools
 
 from .layer_api import LayerApiError, copy_body, manage_accounts_body, portfolio_create_body
+
+DEFAULT_PERILS = ("Earthquake", "Windstorm")
 
 
 class DemoLayerApi:
@@ -43,21 +48,24 @@ class DemoLayerApi:
                          "attachment": t[1] or 0.0})
         return rows
 
-    def _add_base(self, name, number, limit=0.0, attachment=0.0, locations=30, acct_name=None, acct_number=None, description=""):
+    def _add_base(self, name, number, limit=0.0, attachment=0.0, locations=30, acct_name=None, acct_number=None, description="",
+                  perils=None):
         pid = str(next(self._pid))
         aid = str(next(self._aid))
         label = name.split("_", 1)[0]
         self.portfolios[pid] = {"id": pid, "name": name, "number": number, "description": description, "accounts": [aid]}
         self.accounts[aid] = {"id": aid, "name": acct_name or f"{label}_Demo Harbor Properties", "number": acct_number or f"{label}_1001",
                               "locations": locations, "raw": {"cedant": {"cedantName": "ANV"}, "underwriter": {"underwriterName": "TR"}}}
-        self._add_policy(aid, limit, attachment, 1.0)
+        for peril in (DEFAULT_PERILS if perils is None else perils):
+            self._add_policy(aid, limit, attachment, 1.0, peril)
         return pid
 
-    def add_account(self, portfolio_id, name, number, locations=10, limit=0.0, attachment=0.0):
+    def add_account(self, portfolio_id, name, number, locations=10, limit=0.0, attachment=0.0, perils=None):
         aid = str(next(self._aid))
         self.accounts[aid] = {"id": aid, "name": name, "number": number, "locations": locations, "raw": {}}
         self.portfolios[str(portfolio_id)]["accounts"].append(aid)
-        self._add_policy(aid, limit, attachment, 1.0)
+        for peril in (DEFAULT_PERILS if perils is None else perils):
+            self._add_policy(aid, limit, attachment, 1.0, peril)
         return aid
 
     def add_linked_portfolio(self, name, number, base_portfolio_id):
@@ -67,13 +75,14 @@ class DemoLayerApi:
                                 "accounts": list(self.portfolios[str(base_portfolio_id)]["accounts"])}
         return pid
 
-    def _add_policy(self, aid, limit, attachment, blanket):
+    def _add_policy(self, aid, limit, attachment, blanket, peril=None):
         pid = str(next(self._polid))
+        raw = {"policyNumber": f"POL{pid}", "accountId": aid, "status": {"name": "Quote"}, "currency": {"code": "USD"},
+               "coverages": [{"id": 1}], "partOf": limit, "attachmentPoint": attachment, "blanketLimit": blanket}
+        if peril:
+            raw["peril"] = {"id": len(self.policies) + 1, "name": peril}
         self.policies[pid] = {"id": pid, "account_id": aid, "number": f"POL{pid}", "partOf": limit, "attachment": attachment,
-                              "blanket": blanket, "attach_key": "attachmentPoint",
-                              "raw": {"policyNumber": f"POL{pid}", "accountId": aid, "status": {"name": "Quote"},
-                                      "currency": {"code": "USD"}, "coverages": [{"id": 1}], "partOf": limit,
-                                      "attachmentPoint": attachment, "blanketLimit": blanket}}
+                              "blanket": blanket, "attach_key": "attachmentPoint", "raw": raw}
 
     def _maybe_fail(self, what):
         self.calls.append(what)
@@ -134,7 +143,7 @@ class DemoLayerApi:
                               "number": job["number"] if not self.copy_ignores_names else src["number"] + "_C"}
         if not self.drop_policy:
             for pol in [p for p in self.policies.values() if p["account_id"] == job["src"]]:
-                self._add_policy(new, pol["partOf"], pol["attachment"], pol["blanket"])
+                self._add_policy(new, pol["partOf"], pol["attachment"], pol["blanket"], (pol["raw"].get("peril") or {}).get("name"))
 
     # ---------------------------------------------------------------- writes
     def create_portfolio(self, exposure_id, name, number, description=""):
