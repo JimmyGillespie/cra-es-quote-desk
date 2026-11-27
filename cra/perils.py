@@ -4,6 +4,9 @@ An RMS policy is written "for one peril, applying to all locations" and carries 
 are the perils of its policies. This module reads that field tolerantly (RMS may return a code, a name, or an object holding
 both), maps it to the app's peril codes, and says where each answer came from. Nothing here calls RMS or Streamlit.
 
+Winter storm is NOT a peril of its own: RMS models it as severe convective storm (TO), so any winter-storm wording on a policy,
+in the comments or in an earlier analysis is read as severe convective storm (CS).
+
 Order of evidence  (the first that gives an answer decides the default; the rest are shown as suggestions):
   1. the policies themselves                                  -> "policies"
   2. a policy that covers ALL perils                          -> every peril the app can run
@@ -15,16 +18,15 @@ from __future__ import annotations
 
 import re
 
-PERIL_ORDER = ["WS", "EQ", "CS", "WT", "FL", "WF", "TR"]          # the codes the app can run, in a sensible run order
-PERIL_LABEL = {"WS": "Windstorm", "EQ": "Earthquake", "CS": "Severe convective storm", "WT": "Winterstorm",
-               "FL": "Flood", "WF": "Wildfire", "TR": "Terrorism"}
+PERIL_ORDER = ["WS", "EQ", "CS", "FL", "WF", "TR"]                # the codes the app can run, in a sensible run order
+PERIL_LABEL = {"WS": "Windstorm", "EQ": "Earthquake", "CS": "Severe convective storm", "FL": "Flood", "WF": "Wildfire", "TR": "Terrorism"}
+ALIASES = {"WT": "CS", "TO": "CS", "FR": "WF", "HU": "WS"}      # codes that name another peril (winter storm is run as severe convective storm)
 
-# words RMS (or an underwriter) uses for each peril. Whole words only; two-letter words are never used on free text.
+# words RMS (or an underwriter) uses for each peril. Whole words only; short words are never used on free text.
 _WORDS = {
     "WS": {"ws", "windstorm", "wind", "hurricane", "hu", "tc", "cyclone", "typhoon"},
     "EQ": {"eq", "earthquake", "quake", "seismic"},
-    "CS": {"cs", "scs", "sts", "tornado", "hail", "convective", "thunderstorm"},
-    "WT": {"wt", "winter", "winterstorm", "freeze"},
+    "CS": {"cs", "scs", "sts", "to", "tornado", "hail", "convective", "thunderstorm", "wt", "winter", "winterstorm", "freeze"},
     "FL": {"fl", "flood", "floods", "flooding"},
     "WF": {"wf", "fr", "wildfire", "bushfire"},
     "TR": {"tr", "terror", "terrorism"},
@@ -41,15 +43,13 @@ def _words(text: str) -> list:
 
 
 def code_from_text(text: str, *, free_text: bool = False) -> str:
-    """'Earthquake' / 'EQ' / 'Tornado/Hail' / 'Winter Storm' -> 'EQ' / 'EQ' / 'CS' / 'WT'.  '' when it is not a peril.
+    """'Earthquake' / 'EQ' / 'Tornado/Hail' / 'Winter Storm' -> 'EQ' / 'EQ' / 'CS' / 'CS'.  '' when it is not a peril.
     'ALL' for 'All Perils' / 'Multi-Peril'.  free_text=True (comments) ignores short codes and 'all'."""
     t = (text or "").strip()
     if not t:
         return ""
     if _PHRASE_EQ.search(t):
         return "EQ"
-    if not free_text and t.lower() == "to":                          # the old run-list label for tornado/hail, only on its own
-        return "CS"
     if not free_text and _ALL.search(t):
         return "ALL"
     ws = set(_words(t))
@@ -57,6 +57,8 @@ def code_from_text(text: str, *, free_text: bool = False) -> str:
         hit = ws & _WORDS[code]
         if free_text:
             hit = {w for w in hit if w not in _TWO_LETTER}
+        elif code == "CS" and "to" in hit and len(ws) > 1:        # 'to' is only the old tornado/hail label when it stands alone
+            hit = hit - {"to"}
         if hit:
             return code
     if not free_text and ws & {"fire"}:
@@ -111,6 +113,12 @@ def _ordered(codes) -> list:
     return [c for c in PERIL_ORDER if c in set(codes)]
 
 
+def normalise_code(code: str) -> str:
+    """WT (winter storm) and TO (the old tornado / hail code) are severe convective storm; FR is wildfire; HU is windstorm."""
+    c = (code or "").strip().upper()
+    return ALIASES.get(c, c)
+
+
 def derive_perils(policies: list, comments: str = "", earlier=(), available=None) -> dict:
     """What a quote covers.  policies: layer_api.norm_policy() dicts (their 'raw' holds the policy as RMS returned it).
     Returns {codes, source, by_code, policy_texts, unmapped, all_perils, suggested, flake, n_policies}."""
@@ -127,7 +135,7 @@ def derive_perils(policies: list, comments: str = "", earlier=(), available=None
             else:
                 unmapped.append(t)
     comment_codes = codes_in_comments(comments)
-    earlier_codes = [c for c in _ordered(earlier) if c in avail]
+    earlier_codes = [c for c in _ordered({normalise_code(e) for e in earlier}) if c in avail]
     by_code = {}
     if all_flag:
         codes, source = list(avail), "a policy that covers all perils"
