@@ -1,4 +1,9 @@
-"""Shared UI helpers: context, formatting, banners, charts, step status and the analysis-list cache."""
+"""Shared UI helpers: context, formatting, banners, charts, navigation and the analysis-list cache.
+
+Structure of the app: a HOME page (pick an EDM) and, once an EDM is open, a WORKSPACE with a menu:
+Account | Exposure | Add layers | Analyses | Results | Report      (Hazards sits inside Exposure).
+The EDM *is* the account: opening an EDM opens its saved account, or creates it on the spot.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,8 +17,14 @@ from cra.pipeline import AccountPipeline
 from cra.rms.service import RmsService
 from cra.store import AccountStore
 
-STEPS = [("account", "Account"), ("exposure", "Exposure"), ("hazards", "Hazards"), ("layers", "Layers"), ("analyses", "Analyses"),
-         ("results", "Results"), ("report", "Report")]
+# ---- the menu of an open EDM -----------------------------------------------------------------------------
+SECTIONS = [("account", "Account"), ("exposure", "Exposure"), ("layers", "Add layers"), ("analyses", "Analyses"),
+            ("results", "Results"), ("report", "Report")]
+STEPS = SECTIONS                                          # the old name, kept so nothing that imports it breaks
+EXPOSURE_TABS = ["Locations and summary", "Hazards"]
+# goto("hazards") and friends, as the views already call them  ->  (menu section, exposure tab)
+GOTO = {"account": ("account", None), "exposure": ("exposure", EXPOSURE_TABS[0]), "hazards": ("exposure", EXPOSURE_TABS[1]),
+        "layers": ("layers", None), "analyses": ("analyses", None), "results": ("results", None), "report": ("report", None)}
 
 
 @dataclass
@@ -37,8 +48,29 @@ def pipeline() -> AccountPipeline | None:
 
 
 def goto(step: str) -> None:
-    """Switch step at the top of the next run (the step widget already exists by the time a view calls this)."""
+    """Switch the workspace menu at the top of the next run (the menu widget already exists by the time a view calls this)."""
     st.session_state["_goto"] = step
+
+
+def resolve_goto(step: str) -> tuple:
+    return GOTO.get(step, ("account", None))
+
+
+def open_account(account_id: str, section: str = "account") -> None:
+    """Make this account the open one (the app then shows its workspace)."""
+    st.session_state["account_id"] = account_id
+    st.session_state["section"] = section
+    st.session_state.pop("lookup", None)
+
+
+def go_home() -> None:
+    """Leave the workspace and return to the home page."""
+    for k in ("account_id", "section", "exp_tab", "_goto", "lookup", "ov_lookup", "ov_confirm_delete"):
+        st.session_state.pop(k, None)
+    try:
+        st.query_params.clear()
+    except Exception:                                       # noqa: BLE001
+        pass
 
 
 # ---------------------------------------------------------------- formatting
@@ -106,21 +138,26 @@ def progress_cb():
     return cb, bar.empty
 
 
-def step_status(p: AccountPipeline | None) -> dict:
+def section_status(p: AccountPipeline | None) -> dict:
+    """Which menu sections have something in them (shown as a tick in the menu)."""
+    keys = [k for k, _ in SECTIONS]
     if not p:
-        return {k: False for k, _ in STEPS}
+        return {k: False for k in keys}
     parts = (p.store.manifest(p.id) or {}).get("parts", {})
     sel = [a for a in (p.analyses() if "analyses" in parts else []) if a.get("selected")]
-    return {"account": True, "exposure": "locations" in parts, "hazards": "hazards" in parts and "locations" in parts,
-            "layers": "layer_runs" in parts, "analyses": bool(sel), "results": "results" in parts, "report": bool(p.store.list_files(p.id, "reports"))}
+    return {"account": False, "exposure": "locations" in parts, "layers": "layer_runs" in parts,
+            "analyses": bool(sel), "results": "results" in parts, "report": bool(p.store.list_files(p.id, "reports"))}
+
+
+step_status = section_status                              # the old name
 
 
 def need_account() -> AccountPipeline | None:
     p = pipeline()
     if not p:
-        st.info("Open or create a quote on the **Account** step first.", icon=":material/arrow_back:")
-        if st.button("Go to Account"):
-            goto("account")
+        st.info("Open an EDM from the home page first.", icon=":material/arrow_back:")
+        if st.button("Go to the home page"):
+            go_home()
             st.rerun()
     return p
 
@@ -149,7 +186,7 @@ def all_analyses(refresh: bool = False) -> list:
 CSS = """
 <style>
 #MainMenu, footer {visibility:hidden}
-.block-container {padding-top: 1.2rem; max-width: 1320px}
+.block-container {padding-top: 3.6rem; max-width: 1320px}      /* clears Streamlit's fixed header */
 .topbar {background:#0B2545; color:#fff; padding:14px 22px; border-radius:6px; display:flex; align-items:center; justify-content:space-between; margin-bottom:10px}
 .topbar .t {font-size:1.15rem; font-weight:650; letter-spacing:.01em}
 .topbar .s {font-size:.72rem; opacity:.65; letter-spacing:.08em; text-transform:uppercase}
@@ -170,6 +207,9 @@ CSS = """
 .snap td {padding:5px 10px; border-bottom:1px solid #E2E6EF; font-size:.9rem; vertical-align:top}
 .snap td:first-child {font-weight:600; background:#EEF3F9; width:210px; color:#1F3864}
 .snap table {border-collapse:collapse; width:100%; border:1px solid #D5DBE6}
+.row-name {font-weight:600; color:#0B2545}
+.row-sub {color:#5B6478; font-size:.88rem}
+.home-h {font-size:1.5rem; font-weight:650; color:#0B2545; margin:.4rem 0 .2rem}
 div[data-testid="stSegmentedControl"] button {font-weight:550}
 </style>
 """
