@@ -1,6 +1,7 @@
 """Shared constants. Each one notes the VBA it came from so the migration stays traceable."""
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -88,15 +89,218 @@ STATE_NAME_TO_CODE = {
 STATE_CODE_TO_NAME = {v: k for k, v in STATE_NAME_TO_CODE.items()}
 
 
+# ---------------------------------------------------------------- reference data
+# The RDS events and the default model profiles are built in, so a missing, damaged or older-format file in cra/data can
+# never stop the app. cra/data/events.json and cra/data/analysis_profiles.json are optional: anything valid in them is added
+# to (events) or replaces (profiles) the built-in values. Both file layouts are read:  {"events": {id: {"name", "peril"}}}
+# (current) and {"events": {id: "name"}} (older).
+BUILTIN_EVENTS = {
+    '2874165': ('North East Windstorm', 'WS'),
+    '2867710': ('Carolinas Windstorm', 'WS'),
+    '2848918': ('Gulf of Mexico Windstorm', 'WS'),
+    '2865409': ('Miami-Dade Windstorm', 'WS'),
+    '2869298': ('Pinellas Windstorm', 'WS'),
+    '15022534': ('Los Angeles EQ', 'EQ'),
+    '15006191': ('San Francisco EQ', 'EQ'),
+    '15355285': ('New Madrid RDS EQ', 'EQ'),
+    '15631361': ('PNW/BC EQ 100yr', 'EQ'),
+    '15631695': ('PNW/BC EQ 250yr', 'EQ'),
+    '15623863': ('PNW/BC EQ 500yr', 'EQ'),
+    '15669240': ('Quebec EQ 100yr', 'EQ'),
+    '15675523': ('Quebec EQ 250yr', 'EQ'),
+    '15666680': ('Quebec EQ 500yr', 'EQ'),
+}
+
+BUILTIN_PROFILES = {
+    "_status": "LEGACY-UNVERIFIED model IDs, copied from RunAnalysis.bas. The analyses in current quotes use the named profiles in 'reference_profile' (read from the Meta tab). Confirm each ID in RMS before submitting from the app.",
+    "currency": {
+        "code": "USD",
+        "scheme": "RMS",
+        "asOfDate": "2024-04-03",
+        "vintage": "RL24"
+    },
+    "global_analysis_settings": {
+        "franchiseDeductible": False,
+        "treatConstructionOccupancyAsUnknown": True
+    },
+    "output_profile_id": 11,
+    "reference_output_profile": "AS_Amtrust_output",
+    "perils": [
+        {
+            "code": "WS",
+            "label": "Windstorm",
+            "model_profile_id": 90,
+            "event_rate_scheme_id": 578,
+            "reference_profile": ""
+        },
+        {
+            "code": "EQ",
+            "label": "Earthquake",
+            "model_profile_id": 89,
+            "event_rate_scheme_id": 163,
+            "reference_profile": "AS_EQ_PREBIND"
+        },
+        {
+            "code": "CS",
+            "label": "Severe convective storm",
+            "model_profile_id": 91,
+            "event_rate_scheme_id": 69,
+            "reference_profile": "AS_TO_PREBIND"
+        },
+        {
+            "code": "WT",
+            "label": "Winter storm",
+            "model_profile_id": 92,
+            "event_rate_scheme_id": 27,
+            "reference_profile": "AS_WTW_PREBIND"
+        },
+        {
+            "code": "FL",
+            "label": "Flood",
+            "model_profile_id": 163,
+            "event_rate_scheme_id": 49,
+            "reference_profile": "FL_NumSamples_64"
+        },
+        {
+            "code": "WF",
+            "label": "Wildfire",
+            "model_profile_id": 162,
+            "event_rate_scheme_id": 0,
+            "reference_profile": "WF_Samples1024"
+        },
+        {
+            "code": "TR",
+            "label": "Terrorism",
+            "model_profile_id": 150,
+            "event_rate_scheme_id": 0,
+            "reference_profile": "TR_Sample980"
+        }
+    ],
+    "grouping": {
+        "num_simulations": 50000,
+        "simulate_to_plt": True,
+        "propagate_detailed_losses": False,
+        "max_analysis_name": 64,
+        "region_peril_simulation_set": [
+            {
+                "perilCode": "WS",
+                "regionCode": "NA",
+                "modelRegionCode": "NAWS",
+                "eventRateSchemeId": 578,
+                "simulationSetId": 131,
+                "simulationPeriods": 100000,
+                "engineVersion": "RL24"
+            },
+            {
+                "perilCode": "CS",
+                "regionCode": "NA",
+                "modelRegionCode": "USCS",
+                "eventRateSchemeId": 69,
+                "simulationSetId": 84,
+                "simulationPeriods": 100000,
+                "engineVersion": "RL24"
+            },
+            {
+                "perilCode": "EQ",
+                "regionCode": "NA",
+                "modelRegionCode": "NAEQ",
+                "eventRateSchemeId": 163,
+                "simulationSetId": 87,
+                "simulationPeriods": 100000,
+                "engineVersion": "RL24"
+            },
+            {
+                "perilCode": "WT",
+                "regionCode": "NA",
+                "modelRegionCode": "NAWT",
+                "eventRateSchemeId": 27,
+                "simulationSetId": 58,
+                "simulationPeriods": 100000,
+                "engineVersion": "RL24"
+            },
+            {
+                "perilCode": "FL",
+                "regionCode": "US",
+                "modelRegionCode": "USFL",
+                "eventRateSchemeId": 0,
+                "simulationSetId": 36,
+                "simulationPeriods": 51200000,
+                "engineVersion": "HDv1.2"
+            },
+            {
+                "perilCode": "WF",
+                "regionCode": "NA",
+                "modelRegionCode": "NAWF",
+                "eventRateSchemeId": 0,
+                "simulationSetId": 53,
+                "simulationPeriods": 102400000,
+                "engineVersion": "HDv2.0"
+            },
+            {
+                "perilCode": "TR",
+                "regionCode": "ZZ",
+                "modelRegionCode": "ZZTR",
+                "eventRateSchemeId": 0,
+                "simulationSetId": 46,
+                "simulationPeriods": 2073776040,
+                "engineVersion": "HDv1.0"
+            }
+        ]
+    }
+}
+
+_PROFILE_KEYS = ("currency", "global_analysis_settings", "output_profile_id", "perils", "grouping")
+
+
+def _read_json(name: str):
+    """The parsed JSON file in cra/data, or None when it is missing or not valid JSON."""
+    try:
+        return json.loads((DATA_DIR / name).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _peril_from_name(name: str) -> str:
+    low = (name or "").lower()
+    if "wind" in low or "hurricane" in low:
+        return "WS"
+    if "earthquake" in low or " eq" in f" {low}":
+        return "EQ"
+    return ""
+
+
+def _event_table() -> dict:
+    """{eventId: (name, peril)} - the built-in events plus whatever events.json adds, in either layout."""
+    table = dict(BUILTIN_EVENTS)
+    data = _read_json("events.json")
+    rows = data.get("events", data) if isinstance(data, dict) else {}
+    if isinstance(rows, dict):
+        for k, v in rows.items():
+            if isinstance(v, dict):
+                name = str(v.get("name") or k)
+                peril = str(v.get("peril") or "") or _peril_from_name(name)
+            elif isinstance(v, str):
+                name, peril = v, _peril_from_name(v)
+            else:
+                continue
+            table[str(k)] = (name, peril or (table.get(str(k)) or ("", ""))[1])
+    return table
+
+
 def load_events() -> dict:
     """{eventId: name} for the RDS Events tab."""
-    return {k: v["name"] for k, v in json.loads((DATA_DIR / "events.json").read_text(encoding="utf-8"))["events"].items()}
+    return {k: name for k, (name, _p) in _event_table().items()}
 
 
 def load_event_perils() -> dict:
     """{eventId: peril code} - which peril model produces each RDS event."""
-    return {k: v["peril"] for k, v in json.loads((DATA_DIR / "events.json").read_text(encoding="utf-8"))["events"].items()}
+    return {k: peril for k, (_n, peril) in _event_table().items()}
 
 
 def load_profiles() -> dict:
-    return json.loads((DATA_DIR / "analysis_profiles.json").read_text(encoding="utf-8"))
+    """The analysis settings: cra/data/analysis_profiles.json when it is complete, otherwise the built-in defaults."""
+    data = _read_json("analysis_profiles.json")
+    if (isinstance(data, dict) and all(k in data for k in _PROFILE_KEYS) and isinstance(data["perils"], list)
+            and data["perils"] and all(isinstance(p, dict) and "code" in p for p in data["perils"])):
+        return data
+    return copy.deepcopy(BUILTIN_PROFILES)
